@@ -9,6 +9,11 @@ use std::io::{self, Read};
 
 use cli_impl::Run;
 use inkwell::context::Context;
+use inkwell::module::Module;
+use inkwell::passes::PassManager;
+use inkwell::targets::{InitializationConfig, Target};
+use inkwell::values::FunctionValue;
+use inkwell::OptimizationLevel;
 use lexer::Lexer;
 use parser::{Function, Parser};
 
@@ -25,6 +30,7 @@ mod log_impl;
 mod parser;
 mod preprocessor;
 
+const ANONYMOUS_FN_NAME: &str = "__anonymous__"; // Empty string seems to be invalid for LLVM function name.
 type Result<T> = std::result::Result<T, Error>;
 
 fn get_prec() -> HashMap<char, i32> {
@@ -47,21 +53,59 @@ fn parse(tokens: Vec<Token>) -> parser::Result<Option<GlobalVar>> {
     Parser::new(tokens, get_prec()).parse()
 }
 
-fn compile(ctx: &Context, mod_name: &str, function: &Function) -> compiler::Result<()> {
+// Note: Currently, "module" must live longer than returning `FunctionValue`
+// or it will lead to SEGV when printing built LLVM IRs.
+// refer to: https://github.com/TheDan64/inkwell/issues/343
+fn compile<'ctx>(
+    ctx: &'ctx Context,
+    module: &Module<'ctx>,
+    function: &Function,
+) -> compiler::Result<FunctionValue<'ctx>> {
     let builder = ctx.create_builder();
-    let module = ctx.create_module(mod_name);
-    let result = Compiler::default()
+    let fpm = PassManager::create(module);
+    fpm.add_instruction_combining_pass();
+    fpm.add_reassociate_pass();
+    fpm.add_gvn_pass(); // Eliminate Common SubExpressions
+    fpm.add_cfg_simplification_pass();
+    fpm.initialize();
+
+    Compiler::default()
         .builder(&builder)
         .context(ctx)
-        .module(&module)
-        .compile(function)?;
-    log::info!("{result:?}");
-    Ok(())
+        .module(module)
+        .function_pass_manager(&fpm)
+        .compile(function)
+}
+
+fn eval_anonymous_func(
+    module: Module, // maybe better to take ownership of module to force no usage after creating exec engine.
+) {
+    type AnonymousFunction = unsafe extern "C" fn() -> f64;
+    let ee = module
+        .create_jit_execution_engine(OptimizationLevel::None)
+        .unwrap();
+    let maybe_fn = unsafe { ee.get_function::<AnonymousFunction>(ANONYMOUS_FN_NAME) }
+        .expect("Only module with anonymous function alreadly registered is available for jit.");
+    let result = unsafe { maybe_fn.call() };
+    log::info!("{result}");
 }
 
 fn run_interactive(ctx: Context) -> Result<()> {
+    let mut all_expr = Vec::new();
     'main: loop {
         eprint!("?> ");
+
+        // Create module for every loop because each ExecutionEngine takes
+        // ownership (not in Rust's semantics but in LLVM's) and it never
+        // allows any changes to alreadly owned module.
+        let module = ctx.create_module("repl");
+
+        // Adding previous functions to new module is needed (reason is explained above).
+        for function in all_expr.iter() {
+            let _ = compile(&ctx, &module, function)
+                .expect("Failed to compile function which was previously compiled successfully.");
+        }
+
         let mut tokens = vec![];
         let mut first_loop = true;
         loop {
@@ -96,9 +140,19 @@ fn run_interactive(ctx: Context) -> Result<()> {
                 continue;
             }
         };
-        if function.is_anonymous() {
-        } else if let Err(err) = compile(&ctx, "repr", &function) {
-            log::error!("{err:?}");
+        match compile(&ctx, &module, &function) {
+            Ok(func) => {
+                log::info!("Compile succeeded!");
+                log::info!("result:\n{func}");
+
+                // Anonymous function is "top level expression" and we evaluate it (JIT exec) immediately.
+                if function.is_anonymous() {
+                    eval_anonymous_func(module);
+                } else {
+                    all_expr.push(function);
+                }
+            }
+            Err(err) => log::error!("{err:?}"),
         }
     }
     eprintln!("Bye.");
@@ -125,13 +179,30 @@ fn run_non_interactive(ctx: Context, file_name: &str) -> Result<()> {
         log::info!("Funtion with no content.");
         return Ok(());
     };
-    compile(&ctx, mod_name, &function)?;
-    log::info!("Compilation OK!");
+    let module = ctx.create_module(mod_name);
+    let func = compile(&ctx, &module, &function)?;
+    log::info!("Compilation OK!:\n{func}");
     Ok(())
 }
 
 fn main() -> Result<()> {
     log_impl::init_logger();
+
+    let config = InitializationConfig {
+        base: true,
+        asm_parser: true,
+        asm_printer: true,
+        disassembler: false,
+        info: false,
+        machine_code: false,
+    };
+
+    #[cfg(target_arch = "aarch64")]
+    Target::initialize_aarch64(&config);
+
+    #[cfg(not(target_arch = "aarch64"))]
+    log::warn!("Jit for non-aarch64 is currently not supported!");
+
     let ctx = Context::create();
     match cli_impl::parse_arguments() {
         Run::Interactive => run_interactive(ctx),

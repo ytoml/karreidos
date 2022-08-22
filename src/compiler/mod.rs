@@ -2,6 +2,7 @@ use derive_builder::UninitializedFieldError;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
+use inkwell::passes::{PassManager, PassManagerSubType};
 use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, FloatValue, FunctionValue, PointerValue,
@@ -46,6 +47,8 @@ pub struct IrGenerator<'a, 'ctx> {
     ctx: &'ctx Context,
     builder: &'a Builder<'ctx>,
     module: &'a Module<'ctx>,
+    #[builder(setter(name = "function_pass_manager"))]
+    fpm: &'a PassManager<FunctionValue<'ctx>>,
     /// Manages variables in current scope.
     #[builder(default)]
     variables: HashMap<String, PointerValue<'ctx>>, // Note that querying functions are done throuth self.module rather than self.variables
@@ -167,6 +170,9 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
             return Err(CompileError::Redefined(name.to_string(), Type::Funtion));
         }
 
+        // Check if current defining function is not added to module
+        // (it's possible when `name` is not valid, thus useful for debugging).
+        #[cfg(debug_assertions)]
         let _ = self
             .module
             .get_function(name)
@@ -206,15 +212,30 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
             log::debug!("{ret_inst}");
         }
         log::debug!("{:#?}", block);
-        fn_val.verify(true).then_some(fn_val).ok_or_else(|| {
-            log::error!("Function validation failed.");
-            unsafe { fn_val.delete() };
-            CompileError::Fatal(Fatal::Inconsistent(name.to_string(), Type::Funtion))
-        })
+        fn_val
+            .verify(true)
+            .then(|| {
+                log::debug!("Before optimization: {fn_val}");
+                log::debug!("Runnning pass manager...");
+                unsafe {
+                    fn_val.run_in_pass_manager(self.fpm);
+                }
+                log::debug!("After optimization: {fn_val}");
+                fn_val
+            })
+            .ok_or_else(|| {
+                log::error!("Function validation failed.");
+                unsafe { fn_val.delete() };
+                CompileError::Fatal(Fatal::Inconsistent(name.to_string(), Type::Funtion))
+            })
     }
 }
 impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     fn get_function(&self, name: impl AsRef<str>) -> Option<FunctionValue<'ctx>> {
+        // Look into `self.module` rather than `self.variables`
+        // Because (currently) `IeGenerator` provides per function generation and thus
+        // other function in same module may not be found in `self.variable` for most case
+        // (because `self.variable` only manages function-local variables).
         self.module.get_function(name.as_ref())
     }
 
@@ -268,10 +289,12 @@ mod test {
         let ctx = Context::create();
         let builder = ctx.create_builder();
         let module = ctx.create_module("test");
+        let fpm = PassManager::create(&module);
         let _compiler = Compiler::default()
             .builder(&builder)
             .context(&ctx)
             .module(&module)
+            .function_pass_manager(&fpm)
             .build()
             .unwrap();
     }

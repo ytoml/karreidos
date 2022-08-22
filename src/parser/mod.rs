@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use self::ast::Expr;
 use crate::lexer::token::Token;
+use crate::ANONYMOUS_FN_NAME;
 
 pub type Result<T> = std::result::Result<T, ParseError>;
 
@@ -12,6 +13,7 @@ pub enum ParseError {
     Unexpected(Token),
     TokenShortage,
     Unimplemented,
+    Reserved(&'static str),
 }
 
 #[derive(Debug)]
@@ -90,7 +92,11 @@ impl Parser {
                 Token::Fn => self.func()?,
                 _ => self.top_level_expr()?,
             };
-            Ok(Some(GlobalVar::Function(func)))
+            if !func.is_anonymous() && func.proto().name() == ANONYMOUS_FN_NAME {
+                Err(ParseError::Reserved(ANONYMOUS_FN_NAME))
+            } else {
+                Ok(Some(GlobalVar::Function(func)))
+            }
         } else {
             Ok(None)
         }
@@ -106,7 +112,7 @@ impl Parser {
         }
         Ok(Function {
             proto: ProtoType {
-                name: "".to_string(),
+                name: ANONYMOUS_FN_NAME.to_string(),
                 args: vec![],
             },
             body: Some(exprs),
