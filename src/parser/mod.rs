@@ -84,6 +84,11 @@ impl Parser {
         }
     }
 
+    /// ```no_run
+    /// program := top_level_expr
+    ///         | ext
+    ///         | func
+    /// ```
     pub fn parse(&mut self) -> Result<Option<GlobalVar>> {
         if let Some(tok) = self.current() {
             log::debug!("{tok:?}");
@@ -312,12 +317,15 @@ impl Parser {
         })
     }
 
+    // Extern declaration must be done with no contents.
     /// ```no_run
-    /// ext := "extern" proto
+    /// ext := "extern" "fn" proto ";"
     /// ```
     fn ext(&mut self) -> Result<Function> {
         self.try_consume_extern().unwrap();
+        self.try_consume_fn()?;
         let proto = self.proto()?;
+        self.try_consume_single(';')?;
         Ok(Function {
             proto,
             body: None,
