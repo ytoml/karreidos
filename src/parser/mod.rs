@@ -186,8 +186,8 @@ impl Parser {
     }
 
     /// ```no_run
-    /// conditional := "if" expr '{' stmt* '}'
-    ///                ("else" (conditional | '{' stmt* '}')*
+    /// conditional := "if" expr block
+    ///                ("else" (conditional | block)*
     /// ```
     fn conditional(&mut self) -> Result<Expr> {
         self.consume_if();
@@ -358,7 +358,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// func := "fn" proto stmt*
+    /// func := "fn" proto block
     /// ```
     /// # Panics
     /// If current head token is not 'fn'.
@@ -366,22 +366,10 @@ impl Parser {
         // TODO: escaping scope of 'fn'
         self.try_consume_fn()?;
         let proto = self.proto()?;
-        let mut exprs = vec![];
-        loop {
-            if self.current().is_none() {
-                break;
-            }
-            match self.stmt() {
-                Ok(Some(expr)) => exprs.push(expr),
-                res => {
-                    log::debug!("{res:?}");
-                    res?;
-                }
-            }
-        }
+        let stmts = self.block()?;
         Ok(Function {
             proto,
-            body: Some(exprs),
+            body: Some(stmts),
             is_anonymous: false,
         })
     }
