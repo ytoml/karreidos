@@ -3,33 +3,39 @@ pub enum Token {
     Eof,
     Fn,
     Extern,
+    If,
+    Else,
+    For,
     Ident(String),
     Num(f64),
     Comment,
-    Single(char), // currently only single char operator supported.
-                  // LParen,   // '('
-                  // RParen,   // ')'
-                  // LCur,     // '{'
-                  // RCur,     // '}'
-                  // LSq,      // '['
-                  // RSq,      // ']'
-                  // Comma,
-                  // SemiCoron,
+    // Currently only single char operator supported.
+    // Also, Single works for other tokens like braces or brackets.
+    Single(char),
+    Double(&'static str),
 }
 
-// impl From<char> for Token {
-//     fn from(c: char) -> Self {
-//         match c {
-//             '(' => Self::LParen,
-//             ')' => Self::RParen,
-//             '{' => Self::LCur,
-//             '}' => Self::RCur,
-//             '[' => Self::LSq,
-//             ']' => Self::RSq,
-//             c => Self::Op(c),
-//         }
-//     }
-// }
+impl<'a> TryFrom<&'a str> for Token {
+    type Error = &'a str;
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        match value {
+            "fn" => Ok(Self::Fn),
+            "extern" => Ok(Self::Extern),
+            "if" => Ok(Self::If),
+            "else" => Ok(Self::Else),
+            "for" => Ok(Self::For),
+            s if valid_as_ident(s) => Ok(Self::Ident(s.to_string())),
+            s => Err(s),
+        }
+    }
+}
+
+fn valid_as_ident(s: &str) -> bool {
+    matches!(
+        s.chars().peekable().peek().copied(),
+        Some(c) if can_be_head_of_ident(c)
+    ) && s.chars().all(available_in_ident)
+}
 
 pub fn available_in_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'

@@ -61,19 +61,33 @@ impl<'a> Lexer<'a> {
                         Some(_) | None => break,
                     }
                 }
-                let tok = match &self.src[start..pos] {
-                    "fn" => Token::Fn,
-                    "extern" => Token::Extern,
-                    tok => Token::Ident(tok.to_string()),
-                };
-                Ok(tok)
+                let tok = &self.src[start..pos];
+                // We know it's alreadly confirmed tok is non-empty and valid thus can be unwrapped.
+                Ok(tok.try_into().unwrap())
             }
             c if available_in_num(c) => {
-                while matches!(chars.peek(), Some(&c) if available_in_num(c)) {
+                if c == '.' && Some(&'.') == chars.peek() {
                     let _ = chars.next().unwrap();
                     pos += 1;
+                    Ok(Token::Double(".."))
+                } else {
+                    loop {
+                        match chars.peek() {
+                            Some('.')
+                                if pos + 1 < self.src.len() && &self.src[pos..pos + 2] == ".." =>
+                            {
+                                // ".." will be parsed next time.
+                            }
+                            Some(&c) if available_in_num(c) => {
+                                let _ = chars.next().unwrap();
+                                pos += 1;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                        break Ok(Token::Num(self.src[start..pos].parse().unwrap()));
+                    }
                 }
-                Ok(Token::Num(self.src[start..pos].parse().unwrap()))
             }
             // Can be div/comment/block comment (or div-assign in future)
             '/' => match chars.peek() {
@@ -116,6 +130,11 @@ impl<'a> Lexer<'a> {
                 }
                 Some(_) | None => Ok(Token::Single('/')),
             },
+            '<' if matches!(chars.peek(), Some(&'-')) => {
+                let _ = chars.next().unwrap();
+                pos += 1;
+                Ok(Token::Double("<-"))
+            }
             c => Ok(Token::Single(c)),
         };
         self.pos = pos;
@@ -142,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn test() {
+    fn comment() {
         const SRC: &str = r"
             fn main(x, y)
             x = 0.02320840394834;
@@ -175,6 +194,38 @@ mod tests {
             Token::Num(1.0),
             Token::Single('*'),
             Token::Num(3.0),
+            Token::Single(';'),
+        ];
+        expect_success(SRC, expected_tokens)
+    }
+
+    #[test]
+    fn forloop() {
+        const SRC: &str = r"
+            fn main()
+                for i <- 1.0..10.2, 0.1 {
+                    foo();
+                };
+        ";
+        let expected_tokens = vec![
+            Token::Fn,
+            Token::Ident("main".to_string()),
+            Token::Single('('),
+            Token::Single(')'),
+            Token::For,
+            Token::Ident("i".to_string()),
+            Token::Double("<-"),
+            Token::Num(1.0),
+            Token::Double(".."),
+            Token::Num(10.2),
+            Token::Single(','),
+            Token::Num(0.1),
+            Token::Single('{'),
+            Token::Ident("foo".to_string()),
+            Token::Single('('),
+            Token::Single(')'),
+            Token::Single(';'),
+            Token::Single('}'),
             Token::Single(';'),
         ];
         expect_success(SRC, expected_tokens)

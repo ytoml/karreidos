@@ -1,4 +1,5 @@
 use derive_builder::UninitializedFieldError;
+use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -23,7 +24,7 @@ pub enum CompileError {
     Redefined(String, Type),
     InvalidAssignment(Expr),
     Fatal(Fatal),
-    Other(&'static str),
+    Other(String),
 }
 
 #[derive(Debug)]
@@ -52,6 +53,9 @@ pub struct IrGenerator<'a, 'ctx> {
     /// Manages variables in current scope.
     #[builder(default)]
     variables: HashMap<String, PointerValue<'ctx>>, // Note that querying functions are done throuth self.module rather than self.variables
+    // There is no way to set function in building process and always None at first.
+    #[builder(setter(skip))]
+    this_func: Option<FunctionValue<'ctx>>,
 }
 
 impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
@@ -132,12 +136,123 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                     .try_as_basic_value()
                     .left()
                     .map(|value| value.into_float_value())
-                    .ok_or(CompileError::Other(
-                        "Void return value found but currently not supported in karreidos.",
-                    ))
+                    .ok_or_else(|| {
+                        CompileError::Other(
+                            "Void return value found but currently not supported in Karreidos."
+                                .to_string(),
+                        )
+                    })
+            }
+            Expr::If {
+                cond,
+                stmts,
+                else_stmts,
+            } => {
+                let cond = self.expr_gen(cond.as_ref())?;
+                let zero = self.ctx.f64_type().const_zero();
+                let comparison =
+                    self.builder
+                        .build_float_compare(FloatPredicate::ONE, cond, zero, "condtmp");
+
+                let function = self.get_this_function()?;
+                let then_block = self.ctx.append_basic_block(function, "then");
+                let else_block = self.ctx.append_basic_block(function, "else");
+                let merge_block = self.ctx.append_basic_block(function, "merge");
+                let _ = self
+                    .builder
+                    .build_conditional_branch(comparison, then_block, else_block);
+                let (then_value, then_block) =
+                    self.cond_block_gen(stmts, then_block, merge_block)?;
+                let (else_value, else_block) =
+                    self.cond_block_gen(else_stmts, else_block, merge_block)?;
+                self.builder.position_at_end(merge_block);
+                let phi_value = self.builder.build_phi(self.ctx.f64_type(), "iftmp");
+                phi_value.add_incoming(&[(&then_value, then_block), (&else_value, else_block)]);
+                Ok(phi_value.as_basic_value().into_float_value())
+            }
+            Expr::For {
+                start,
+                end,
+                step,
+                generatee,
+                stmts,
+            } => {
+                let function = self.get_this_function()?;
+                let start_value = self.expr_gen(start.as_ref())?;
+                let acc_alloca = self.entry_block_stack_alloca("start", &function);
+                self.builder.build_store(acc_alloca, start_value);
+
+                let end_value = self.expr_gen(end.as_ref())?;
+                let step_value = self.expr_gen(step.as_ref())?;
+
+                // Preserve the lower level variable of the save name.
+                let lower_scope_var = self.variables.insert(generatee.clone(), acc_alloca);
+
+                let for_block = self.ctx.append_basic_block(function, "for");
+                self.builder.build_unconditional_branch(for_block);
+                let for_value = self.block_gen(stmts, for_block)?;
+                self.builder.position_at_end(for_block);
+
+                let acc_value = self
+                    .builder
+                    .build_load(acc_alloca, "acctmp")
+                    .into_float_value();
+                let next_acc_value =
+                    self.builder
+                        .build_float_add(acc_value, step_value, "stepaddtmp");
+                self.builder.build_store(acc_alloca, next_acc_value);
+                let comparison = self.builder.build_float_compare(
+                    FloatPredicate::OLT,
+                    next_acc_value,
+                    end_value,
+                    "forcondtmp",
+                );
+                let break_block = self.ctx.append_basic_block(function, "break");
+                let _ = self
+                    .builder
+                    .build_conditional_branch(comparison, for_block, break_block);
+                self.builder.position_at_end(break_block);
+
+                if let Some(value) = lower_scope_var {
+                    let _ = self.variables.insert(generatee.clone(), value);
+                } else {
+                    let _ = self.variables.remove(generatee);
+                }
+                Ok(for_value)
             }
         }
     }
+
+    fn block_gen(
+        &mut self,
+        stmts: &[Expr],
+        basic_block: BasicBlock<'ctx>,
+    ) -> Result<FloatValue<'ctx>> {
+        let mut values = stmts
+            .iter()
+            .map(|expr| {
+                self.builder.position_at_end(basic_block);
+                self.expr_gen(expr)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(values
+            .pop()
+            .unwrap_or_else(|| self.ctx.f64_type().const_zero()))
+    }
+
+    fn cond_block_gen(
+        &mut self,
+        stmts: &[Expr],
+        branch_block: BasicBlock<'ctx>,
+        merge_block: BasicBlock<'ctx>,
+    ) -> Result<(FloatValue<'ctx>, BasicBlock<'ctx>)> {
+        let branch_value = self.block_gen(stmts, branch_block)?;
+        // block_gen() above might change current block (e.g. nested conditional branches), thus we have to recall here.
+        let branch_block = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge_block);
+        Ok((branch_value, branch_block))
+    }
+
     fn proto_gen(&self, proto: &ProtoType) -> Result<FunctionValue<'ctx>> {
         let mut arg_types = Vec::with_capacity(proto.num_args());
         for _ in 0..proto.num_args() {
@@ -177,6 +292,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
             .module
             .get_function(name)
             .ok_or_else(|| CompileError::Undefined(name.to_string(), Type::Funtion))?;
+        self.register_this_function(fn_val)?;
 
         // Only single basic block is needed until we implement control flow.
         let block = self.ctx.append_basic_block(fn_val, "entry");
@@ -196,26 +312,18 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
         log::debug!("{:#?}", block);
 
         // XXX: is expr really needed to be array?
-        if let Some(exprs) = function.body() {
-            let mut body = None;
-            for expr in exprs {
-                self.builder.position_at_end(block);
-                let value = self.expr_gen(expr)?;
-                log::debug!("{:#?}", block);
-                let _ = body.insert(value); // preserve the last value
-            }
-            log::debug!("{name}: building return... {body:?}");
+        if let Some(stmts) = function.body() {
+            let return_value = self.block_gen(stmts, block)?;
+            log::debug!("{name}: building return... {return_value:?}");
+            let block = self.builder.get_insert_block().unwrap();
             self.builder.position_at_end(block);
-            let ret_inst = self
-                .builder
-                .build_return(body.as_ref().map(|v| v as &dyn BasicValue));
-            log::debug!("{ret_inst}");
+            let return_inst = self.builder.build_return(Some(&return_value));
+            log::debug!("{return_inst}");
         }
-        log::debug!("{:#?}", block);
+        log::debug!("Before optimization: {fn_val}");
         fn_val
             .verify(true)
             .then(|| {
-                log::debug!("Before optimization: {fn_val}");
                 log::debug!("Runnning pass manager...");
                 unsafe {
                     fn_val.run_in_pass_manager(self.fpm);
@@ -231,6 +339,25 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     }
 }
 impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
+    fn get_this_function(&self) -> Result<FunctionValue<'ctx>> {
+        self.this_func.ok_or_else(|| {
+            CompileError::Other("Function required while it has not been set yet".to_string())
+        })
+    }
+
+    fn register_this_function(&mut self, function: FunctionValue<'ctx>) -> Result<()> {
+        match self.this_func {
+            None => {
+                let _ = self.this_func.insert(function);
+                Ok(())
+            }
+            Some(func) => Err(CompileError::Other(format!(
+                "Tried to register multiple functions: {:?}",
+                func.get_name()
+            ))),
+        }
+    }
+
     fn get_function(&self, name: impl AsRef<str>) -> Option<FunctionValue<'ctx>> {
         // Look into `self.module` rather than `self.variables`
         // Because (currently) `IeGenerator` provides per function generation and thus

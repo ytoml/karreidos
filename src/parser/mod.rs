@@ -153,14 +153,83 @@ impl Parser {
     /// primary := ident_expr
     ///         | num_expr
     ///         | paren_expr
+    ///         | contional
+    ///         | for_expr
     /// ```
     fn primary(&mut self) -> Result<Expr> {
         match self.expect()? {
             Token::Ident(_) => self.ident_expr(),
             Token::Num(_) => self.num_expr(),
             Token::Single('(') => self.paren_expr(),
+            Token::If => self.conditional(),
+            Token::For => self.for_expr(),
             tok => Err(ParseError::Unexpected(tok)),
         }
+    }
+
+    /// ```no_run
+    /// block := '{' stmt* '}'
+    /// ```
+    fn block(&mut self) -> Result<Vec<Expr>> {
+        self.try_consume_single('{')?;
+        let mut stmts = vec![];
+        loop {
+            if self.is_single('}')? {
+                self.consume_single('}');
+                break;
+            }
+            if let Some(stmt) = self.stmt()? {
+                stmts.push(stmt);
+            }
+        }
+        Ok(stmts)
+    }
+
+    /// ```no_run
+    /// conditional := "if" expr '{' stmt* '}'
+    ///                ("else" (conditional | '{' stmt* '}')*
+    /// ```
+    fn conditional(&mut self) -> Result<Expr> {
+        self.consume_if();
+        let cond = self.expr()?.boxed();
+        let stmts = self.block()?;
+        let mut else_stmts = vec![];
+        if let Some(Token::Else) = self.current() {
+            let _ = self.consume();
+            if let Some(Token::If) = self.current() {
+                let expr = self.conditional()?;
+                else_stmts.push(expr);
+            } else {
+                else_stmts = self.block()?
+            }
+        }
+        Ok(Expr::If {
+            cond,
+            stmts,
+            else_stmts,
+        })
+    }
+
+    /// ```no_run
+    /// for_expr := "for" ident "<-" expr ".." expr ',' expr block
+    /// ```
+    fn for_expr(&mut self) -> Result<Expr> {
+        self.consume_for();
+        let generatee = self.try_consume_ident()?;
+        self.try_consume_double("<-")?;
+        let start = self.expr()?.boxed();
+        self.try_consume_double("..")?;
+        let end = self.expr()?.boxed();
+        self.try_consume_single(',')?;
+        let step = self.expr()?.boxed();
+        let stmts = self.block()?;
+        Ok(Expr::For {
+            start,
+            end,
+            step,
+            generatee,
+            stmts,
+        })
     }
 
     fn current_precedence(&self) -> Option<i32> {
@@ -399,18 +468,56 @@ impl Parser {
         self._try_consume_specified(Token::Single(c)).map(|_| ())
     }
 
+    #[inline]
     fn consume_single(&mut self, c: char) {
         self.try_consume_single(c).unwrap();
     }
 
+    #[inline]
+    fn try_consume_double(&mut self, s: &'static str) -> Result<()> {
+        debug_assert!(
+            s.chars().count() == 2,
+            "Internal Error: try_consume_double called with string not length of 2."
+        );
+        self._try_consume_specified(Token::Double(s)).map(|_| ())
+    }
+
+    #[inline]
+    fn _consume_double(&mut self, s: &'static str) {
+        self.try_consume_double(s).unwrap();
+    }
+
+    #[inline]
     fn try_consume_fn(&mut self) -> Result<()> {
         self._try_consume_specified(Token::Fn).map(|_| ())
     }
 
+    #[inline]
+    fn try_consume_if(&mut self) -> Result<()> {
+        self._try_consume_specified(Token::If).map(|_| ())
+    }
+
+    #[inline]
+    fn consume_if(&mut self) {
+        self.try_consume_if().unwrap();
+    }
+
+    #[inline]
+    fn try_consume_for(&mut self) -> Result<()> {
+        self._try_consume_specified(Token::For).map(|_| ())
+    }
+
+    #[inline]
+    fn consume_for(&mut self) {
+        self.try_consume_for().unwrap();
+    }
+
+    #[inline]
     fn try_consume_extern(&mut self) -> Result<()> {
         self._try_consume_specified(Token::Extern).map(|_| ())
     }
 
+    #[inline]
     fn try_consume_ident(&mut self) -> Result<String> {
         let tok = self.try_consume()?;
         if let Token::Ident(name) = tok {
@@ -420,6 +527,7 @@ impl Parser {
         }
     }
 
+    #[inline]
     fn is_single(&self, c: char) -> Result<bool> {
         Ok(self.expect()? == Token::Single(c))
     }

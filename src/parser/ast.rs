@@ -9,8 +9,26 @@ pub enum Expr {
         callee: String,
         args: Vec<Expr>,
     },
+    If {
+        cond: Box<Expr>,
+        stmts: Vec<Expr>,
+        // Note that it has single Expr::If for "else if ..."
+        else_stmts: Vec<Expr>,
+    },
+    For {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        step: Box<Expr>,
+        generatee: String, // currently only 1 variable can be generated
+        stmts: Vec<Expr>,
+    },
     Variable(String),
     Number(f64),
+}
+impl Expr {
+    pub fn boxed(self) -> Box<Self> {
+        Box::new(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
