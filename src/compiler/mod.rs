@@ -10,7 +10,8 @@ use inkwell::values::{
 };
 use inkwell::FloatPredicate;
 use std::borrow::Borrow;
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 
 use crate::parser::{Function, ProtoType};
 // use derive_builder::Builder;
@@ -50,9 +51,10 @@ pub struct IrGenerator<'a, 'ctx> {
     module: &'a Module<'ctx>,
     #[builder(setter(name = "function_pass_manager"))]
     fpm: &'a PassManager<FunctionValue<'ctx>>,
-    /// Manages variables in current scope.
+    /// Manages variables.
+    /// HashMap on back is current scope.
     #[builder(default)]
-    variables: HashMap<String, PointerValue<'ctx>>, // Note that querying functions are done throuth self.module rather than self.variables
+    variables: VecDeque<HashMap<String, PointerValue<'ctx>>>,
     // There is no way to set function in building process and always None at first.
     #[builder(setter(skip))]
     this_func: Option<FunctionValue<'ctx>>,
@@ -63,10 +65,25 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
         match expr {
             &Expr::Number(value) => Ok(self.ctx.f64_type().const_float(value)),
             Expr::Variable(name) => self
-                .variables
-                .get(name)
+                .get_variable(name)
                 .map(|pval| self.builder.build_load(*pval, name).into_float_value())
                 .ok_or_else(|| CompileError::Undefined(name.clone(), Type::Variable)),
+            Expr::Decl { name, left } => {
+                let current_block = self.get_current_block();
+                let alloca = self.stack_alloca_in_block(name, current_block);
+                self.register_variable_at_current_scope(name.clone(), alloca)?;
+                let value = self.expr_gen(left.as_ref())?;
+                self.builder.build_store(alloca, value);
+                // Declaration statement itself has no value (like Rust).
+                Ok(self.ctx.f64_type().const_zero())
+            }
+            Expr::Block(stmts) => {
+                self.scope_up();
+                let current_block = self.get_current_block();
+                let block_value = self.block_gen(stmts, current_block)?;
+                self.scope_down();
+                Ok(block_value)
+            }
             Expr::Binary { op, left, right } => {
                 let lhs = self.expr_gen(left.as_ref())?;
                 let rhs = self.expr_gen(right.as_ref())?;
@@ -111,8 +128,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                         let expr_value = self.expr_gen(right.as_ref())?;
                         log::debug!("assignment: right value {expr_value}");
                         let var_ptr = self
-                            .variables
-                            .get(&var_name)
+                            .get_variable(&var_name)
                             .ok_or(CompileError::Undefined(var_name, Type::Variable))?;
                         let _ = self.builder.build_store(*var_ptr, expr_value);
                         Ok(expr_value)
@@ -155,19 +171,29 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                         .build_float_compare(FloatPredicate::ONE, cond, zero, "condtmp");
 
                 let function = self.get_this_function()?;
+                let origin_block = self.get_current_block();
+
                 let then_block = self.ctx.append_basic_block(function, "then");
+                let then_value = self.block_gen(stmts, then_block)?;
+                // Restoration is needed in case of nested branches (i.e. current block is not "then" anymore).
+                let then_end_block = self.get_current_block();
+
                 let else_block = self.ctx.append_basic_block(function, "else");
-                let merge_block = self.ctx.append_basic_block(function, "merge");
+                let else_value = self.block_gen(else_stmts, else_block)?;
+                let else_end_block = self.get_current_block();
+
+                self.goto_end_of_block(origin_block);
                 let _ = self
                     .builder
                     .build_conditional_branch(comparison, then_block, else_block);
-                let (then_value, then_block) =
-                    self.cond_block_gen(stmts, then_block, merge_block)?;
-                let (else_value, else_block) =
-                    self.cond_block_gen(else_stmts, else_block, merge_block)?;
-                self.builder.position_at_end(merge_block);
+
+                let merge_block = self.ctx.append_basic_block(function, "merge");
+                self.insert_terminating_jump(then_end_block, merge_block);
+                self.insert_terminating_jump(else_end_block, merge_block);
+                self.goto_start_of_block(merge_block);
                 let phi_value = self.builder.build_phi(self.ctx.f64_type(), "iftmp");
-                phi_value.add_incoming(&[(&then_value, then_block), (&else_value, else_block)]);
+                phi_value
+                    .add_incoming(&[(&then_value, then_end_block), (&else_value, else_end_block)]);
                 Ok(phi_value.as_basic_value().into_float_value())
             }
             Expr::For {
@@ -178,22 +204,21 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                 stmts,
             } => {
                 let function = self.get_this_function()?;
+                let current_block = self.get_current_block();
                 let start_value = self.expr_gen(start.as_ref())?;
-                let acc_alloca = self.entry_block_stack_alloca("start", &function);
-                self.builder.build_store(acc_alloca, start_value);
-
                 let end_value = self.expr_gen(end.as_ref())?;
                 let step_value = self.expr_gen(step.as_ref())?;
+                let acc_alloca = self.stack_alloca_in_block(generatee, current_block);
 
-                // Preserve the lower level variable of the save name.
-                let lower_scope_var = self.variables.insert(generatee.clone(), acc_alloca);
-
-                let for_block = self.ctx.append_basic_block(function, "for");
                 // Must ensure this jump is terminator for current block
-                let current_block = self.get_current_block();
-                self.builder.position_at_end(current_block);
-                self.builder.build_unconditional_branch(for_block);
+                self.goto_end_of_current_block();
+                self.builder.build_store(acc_alloca, start_value);
+                let for_block = self.ctx.append_basic_block(function, "for");
+                self.insert_terminating_jump(current_block, for_block);
 
+                self.scope_up();
+                self.goto_start_of_block(for_block);
+                self.register_variable_at_current_scope(generatee.clone(), acc_alloca)?;
                 let for_value = self.block_gen(stmts, for_block)?;
                 self.builder.position_at_end(for_block);
                 let acc_value = self
@@ -210,49 +235,31 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                     end_value,
                     "forcondtmp",
                 );
+                self.scope_down();
+
                 let break_block = self.ctx.append_basic_block(function, "break");
                 self.builder
                     .build_conditional_branch(comparison, for_block, break_block);
                 self.builder.position_at_end(break_block);
-
-                if let Some(value) = lower_scope_var {
-                    let _ = self.variables.insert(generatee.clone(), value);
-                } else {
-                    let _ = self.variables.remove(generatee);
-                }
                 Ok(for_value)
             }
         }
     }
 
+    // For flexibility, scope_(up|down) are not in this function.
     fn block_gen(
         &mut self,
         stmts: &[Expr],
         basic_block: BasicBlock<'ctx>,
     ) -> Result<FloatValue<'ctx>> {
+        self.goto_end_of_block(basic_block);
         let mut values = stmts
             .iter()
-            .map(|expr| {
-                self.builder.position_at_end(basic_block);
-                self.expr_gen(expr)
-            })
+            .map(|expr| self.expr_gen(expr))
             .collect::<Result<Vec<_>>>()?;
         Ok(values
             .pop()
             .unwrap_or_else(|| self.ctx.f64_type().const_zero()))
-    }
-
-    fn cond_block_gen(
-        &mut self,
-        stmts: &[Expr],
-        branch_block: BasicBlock<'ctx>,
-        merge_block: BasicBlock<'ctx>,
-    ) -> Result<(FloatValue<'ctx>, BasicBlock<'ctx>)> {
-        let branch_value = self.block_gen(stmts, branch_block)?;
-        // block_gen() above might change current block (e.g. nested conditional branches), thus we have to recall here.
-        let branch_block = self.get_current_block();
-        self.builder.build_unconditional_branch(merge_block);
-        Ok((branch_value, branch_block))
     }
 
     fn proto_gen(&self, proto: &ProtoType) -> Result<FunctionValue<'ctx>> {
@@ -296,24 +303,17 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
             .ok_or_else(|| CompileError::Undefined(name.to_string(), Type::Funtion))?;
         self.register_this_function(fn_val)?;
 
-        // Only single basic block is needed until we implement control flow.
         let block = self.ctx.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(block);
 
-        // Make arguments name accesible in [`expr_gen()`].
+        self.scope_up();
         self.variables.reserve(proto.num_args());
-
         for (arg_name, arg) in proto.arg_names_slice().iter().zip(fn_val.get_param_iter()) {
             log::debug!("{name}: add arg {arg_name}");
             let stack_alloca = self.entry_block_stack_alloca(name, &fn_val);
             let _ = self.builder.build_store(stack_alloca, arg);
-            if let Some(_prev_alloca) = self.variables.insert(arg_name.clone(), stack_alloca) {
-                return Err(CompileError::Redefined(arg_name.clone(), Type::Argument));
-            }
+            self.register_argument(arg_name.clone(), stack_alloca)?;
         }
-        log::debug!("{:#?}", block);
-
-        // XXX: is expr really needed to be array?
         if let Some(stmts) = function.body() {
             let return_value = self.block_gen(stmts, block)?;
             log::debug!("{name}: building return... {return_value:?}");
@@ -322,6 +322,8 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
             let return_inst = self.builder.build_return(Some(&return_value));
             log::debug!("{return_inst}");
         }
+        self.scope_down();
+
         log::debug!("Before optimization: {fn_val}");
         fn_val
             .verify(true)
@@ -374,27 +376,109 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
             .expect("Try to get basic block while no one is set.")
     }
 
-    /// Creates a new stack allocation instruction in the entry block of the function.
+    fn _register_at_current_scope(
+        &mut self,
+        name: String,
+        value: PointerValue<'ctx>,
+        ty: Type,
+    ) -> Result<()> {
+        let current_scope = self.variables.back_mut().expect("No scope is available.");
+        match current_scope.entry(name) {
+            Entry::Occupied(entry) => Err(CompileError::Redefined(entry.remove_entry().0, ty)),
+            Entry::Vacant(entry) => {
+                entry.insert(value);
+                Ok(())
+            }
+        }
+    }
+
+    #[inline]
+    fn register_variable_at_current_scope(
+        &mut self,
+        name: String,
+        value: PointerValue<'ctx>,
+    ) -> Result<()> {
+        self._register_at_current_scope(name, value, Type::Variable)
+    }
+
+    #[inline]
+    fn register_argument(&mut self, name: String, value: PointerValue<'ctx>) -> Result<()> {
+        self._register_at_current_scope(name, value, Type::Argument)
+    }
+
+    #[inline]
+    fn get_variable(&self, name: &str) -> Option<&PointerValue<'ctx>> {
+        self.variables
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+    }
+
+    #[inline]
+    fn goto_start_of_block(&self, basic_block: BasicBlock<'ctx>) {
+        match basic_block.get_first_instruction() {
+            Some(instruction) => self.builder.position_before(&instruction),
+            None => self.builder.position_at_end(basic_block),
+        }
+    }
+
+    #[inline]
+    fn goto_end_of_block(&self, basic_block: BasicBlock<'ctx>) {
+        self.builder.position_at_end(basic_block);
+    }
+
+    #[inline]
+    fn _goto_start_of_current_block(&self) {
+        self.goto_start_of_block(self.get_current_block());
+    }
+
+    #[inline]
+    fn goto_end_of_current_block(&self) {
+        self.goto_end_of_block(self.get_current_block());
+    }
+
+    #[inline]
+    fn insert_terminating_jump(&self, from_block: BasicBlock<'ctx>, to_block: BasicBlock<'ctx>) {
+        self.goto_end_of_block(from_block);
+        self.builder.build_unconditional_branch(to_block);
+    }
+
+    // Insert stack allocation at beggining of the basic block
+    fn stack_alloca_in_block(
+        &self,
+        var_name: &str,
+        basic_block: BasicBlock<'ctx>,
+    ) -> PointerValue<'ctx> {
+        self.goto_start_of_block(basic_block);
+        // only f64 supported now
+        self.builder.build_alloca(self.ctx.f64_type(), var_name)
+    }
+
+    // Creates a new stack allocation instruction in the entry block of the function.
     fn entry_block_stack_alloca(
         &self,
         var_name: &str,
         fn_val: &FunctionValue<'ctx>,
     ) -> PointerValue<'ctx> {
-        let entry = fn_val.get_first_basic_block().unwrap_or_else(|| {
+        let entry_block = fn_val.get_first_basic_block().unwrap_or_else(|| {
             panic!(
                 "Internal(entry_block_stack_alloca): basic block not allocated for {:?}",
                 fn_val.get_name()
             )
         });
+        self.stack_alloca_in_block(var_name, entry_block)
+    }
 
-        // Insert stack allocation at beggining of the entry.
-        match entry.get_first_instruction() {
-            Some(instruction) => self.builder.position_before(&instruction),
-            None => self.builder.position_at_end(entry),
-        };
+    #[inline]
+    fn scope_up(&mut self) {
+        self.variables.push_back(HashMap::new());
+    }
 
-        // only f64 supported now
-        self.builder.build_alloca(self.ctx.f64_type(), var_name)
+    #[inline]
+    fn scope_down(&mut self) {
+        self.variables
+            .pop_back()
+            .expect("Cannot scope down anymore.");
     }
 }
 

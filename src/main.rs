@@ -93,7 +93,7 @@ fn eval_anonymous_func(
 fn run_interactive(ctx: Context) -> Result<()> {
     let mut all_expr = Vec::new();
     'main: loop {
-        eprint!("?> ");
+        eprint!("?>> ");
 
         // Create module for every loop because each ExecutionEngine takes
         // ownership (not in Rust's semantics but in LLVM's) and it never
@@ -125,6 +125,7 @@ fn run_interactive(ctx: Context) -> Result<()> {
             }
             let mut new_tokens = lex(&input)?;
             tokens.append(&mut new_tokens);
+            eprint!("... ");
         }
         let function = match parse(tokens) {
             Ok(Some(GlobalVar::Function(func))) => {

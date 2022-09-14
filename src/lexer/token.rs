@@ -6,6 +6,7 @@ pub enum Token {
     If,
     Else,
     For,
+    Let,
     Ident(String),
     Num(f64),
     Comment,
@@ -24,6 +25,7 @@ impl<'a> TryFrom<&'a str> for Token {
             "if" => Ok(Self::If),
             "else" => Ok(Self::Else),
             "for" => Ok(Self::For),
+            "let" => Ok(Self::Let),
             s if valid_as_ident(s) => Ok(Self::Ident(s.to_string())),
             s => Err(s),
         }

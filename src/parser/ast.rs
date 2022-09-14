@@ -22,6 +22,11 @@ pub enum Expr {
         generatee: String, // currently only 1 variable can be generated
         stmts: Vec<Expr>,
     },
+    Decl {
+        name: String,
+        left: Box<Expr>,
+    },
+    Block(Vec<Expr>), // needed to manage scope
     Variable(String),
     Number(f64),
 }

@@ -134,19 +134,39 @@ impl Parser {
     }
 
     /// ```no_run
-    /// stmt := expr ';'
+    /// stmt := ( decl | expr | block ) ';'
     /// ```
     fn stmt(&mut self) -> Result<Option<Expr>> {
         // TODO: refine BNF
         let _ = self._consume_comment();
-        if self.is_single(';')? {
+        if self.current_is_single(';')? {
             self.consume_single(';');
             return Ok(None);
         }
-        let expr = self.expr()?;
+        let expr = if self.current_is_let()? {
+            self.decl()?
+        } else if self.current_is_single('{')? {
+            let stmts = self.block()?;
+            Expr::Block(stmts)
+        } else {
+            self.expr()?
+        };
         log::debug!("{expr:?}");
         self.try_consume_single(';')?;
         Ok(Some(expr))
+    }
+
+    /// ```no_run
+    /// decl := "let" ident "=" expr
+    /// ```
+    fn decl(&mut self) -> Result<Expr> {
+        self.consume_let();
+        let name = self.try_consume_ident()?;
+        log::debug!("decl: {name}");
+        self.try_consume_single('=')?;
+        let left = self.expr()?.boxed();
+        log::debug!("decl: {name} = {left:?}");
+        Ok(Expr::Decl { name, left })
     }
 
     /// ```no_run
@@ -174,7 +194,7 @@ impl Parser {
         self.try_consume_single('{')?;
         let mut stmts = vec![];
         loop {
-            if self.is_single('}')? {
+            if self.current_is_single('}')? {
                 self.consume_single('}');
                 break;
             }
@@ -307,16 +327,16 @@ impl Parser {
     /// ```
     fn ident_expr(&mut self) -> Result<Expr> {
         let name = self.try_consume_ident()?;
-        if self.is_single('(')? {
+        if self.current_is_single('(')? {
             self.pos += 1;
             let mut args = Vec::new();
             loop {
-                if self.is_single(')')? {
+                if self.current_is_single(')')? {
                     break;
                 }
                 let expr = self.expr()?;
                 args.push(expr);
-                if !self.is_single(',')? {
+                if !self.current_is_single(',')? {
                     break;
                 }
                 self.consume_single(',');
@@ -341,7 +361,7 @@ impl Parser {
                 Token::Ident(name) => {
                     self.pos += 1;
                     args.push(name);
-                    if !self.is_single(',')? {
+                    if !self.current_is_single(',')? {
                         self.try_consume_single(')')?;
                         break;
                     }
@@ -450,7 +470,29 @@ impl Parser {
             Err(ParseError::Unexpected(tok))
         }
     }
+}
 
+macro_rules! impl_consume {
+    ($(($fn_suffix:ident, $TokenVariant:ident)),+ $(,)?) => {
+        paste::paste!{
+                $(
+                #[allow(unused)]
+                #[inline]
+                fn [<consume_ $fn_suffix>](&mut self) {
+                    self.[<try_consume_ $fn_suffix>]().unwrap();
+                }
+
+                #[allow(unused)]
+                #[inline]
+                fn [<try_consume_ $fn_suffix>](&mut self) -> Result<()> {
+                    self._try_consume_specified(Token::$TokenVariant).map(|_| ())
+                }
+            )+
+        }
+    };
+}
+
+impl Parser {
     #[inline]
     fn try_consume_single(&mut self, c: char) -> Result<()> {
         self._try_consume_specified(Token::Single(c)).map(|_| ())
@@ -459,6 +501,11 @@ impl Parser {
     #[inline]
     fn consume_single(&mut self, c: char) {
         self.try_consume_single(c).unwrap();
+    }
+
+    #[inline]
+    fn current_is_single(&self, c: char) -> Result<bool> {
+        Ok(self.expect()? == Token::Single(c))
     }
 
     #[inline]
@@ -475,34 +522,17 @@ impl Parser {
         self.try_consume_double(s).unwrap();
     }
 
-    #[inline]
-    fn try_consume_fn(&mut self) -> Result<()> {
-        self._try_consume_specified(Token::Fn).map(|_| ())
+    impl_consume! {
+        (fn, Fn),
+        (if, If),
+        (for, For),
+        (extern, Extern),
+        (let, Let)
     }
 
     #[inline]
-    fn try_consume_if(&mut self) -> Result<()> {
-        self._try_consume_specified(Token::If).map(|_| ())
-    }
-
-    #[inline]
-    fn consume_if(&mut self) {
-        self.try_consume_if().unwrap();
-    }
-
-    #[inline]
-    fn try_consume_for(&mut self) -> Result<()> {
-        self._try_consume_specified(Token::For).map(|_| ())
-    }
-
-    #[inline]
-    fn consume_for(&mut self) {
-        self.try_consume_for().unwrap();
-    }
-
-    #[inline]
-    fn try_consume_extern(&mut self) -> Result<()> {
-        self._try_consume_specified(Token::Extern).map(|_| ())
+    fn current_is_let(&self) -> Result<bool> {
+        Ok(self.expect()? == Token::Let)
     }
 
     #[inline]
@@ -513,10 +543,5 @@ impl Parser {
         } else {
             Err(ParseError::Unexpected(tok))
         }
-    }
-
-    #[inline]
-    fn is_single(&self, c: char) -> Result<bool> {
-        Ok(self.expect()? == Token::Single(c))
     }
 }
