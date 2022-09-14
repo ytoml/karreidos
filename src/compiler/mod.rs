@@ -189,10 +189,13 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                 let lower_scope_var = self.variables.insert(generatee.clone(), acc_alloca);
 
                 let for_block = self.ctx.append_basic_block(function, "for");
+                // Must ensure this jump is terminator for current block
+                let current_block = self.get_current_block();
+                self.builder.position_at_end(current_block);
                 self.builder.build_unconditional_branch(for_block);
+
                 let for_value = self.block_gen(stmts, for_block)?;
                 self.builder.position_at_end(for_block);
-
                 let acc_value = self
                     .builder
                     .build_load(acc_alloca, "acctmp")
@@ -208,8 +211,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                     "forcondtmp",
                 );
                 let break_block = self.ctx.append_basic_block(function, "break");
-                let _ = self
-                    .builder
+                self.builder
                     .build_conditional_branch(comparison, for_block, break_block);
                 self.builder.position_at_end(break_block);
 
@@ -248,7 +250,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     ) -> Result<(FloatValue<'ctx>, BasicBlock<'ctx>)> {
         let branch_value = self.block_gen(stmts, branch_block)?;
         // block_gen() above might change current block (e.g. nested conditional branches), thus we have to recall here.
-        let branch_block = self.builder.get_insert_block().unwrap();
+        let branch_block = self.get_current_block();
         self.builder.build_unconditional_branch(merge_block);
         Ok((branch_value, branch_block))
     }
@@ -364,6 +366,12 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
         // other function in same module may not be found in `self.variable` for most case
         // (because `self.variable` only manages function-local variables).
         self.module.get_function(name.as_ref())
+    }
+
+    fn get_current_block(&self) -> BasicBlock<'ctx> {
+        self.builder
+            .get_insert_block()
+            .expect("Try to get basic block while no one is set.")
     }
 
     /// Creates a new stack allocation instruction in the entry block of the function.
