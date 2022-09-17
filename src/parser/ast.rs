@@ -19,11 +19,11 @@ pub enum Expr {
         start: Box<Expr>,
         end: Box<Expr>,
         step: Box<Expr>,
-        generatee: String, // currently only 1 variable can be generated
+        generatee: Value, // currently only 1 variable can be generated
         stmts: Vec<Expr>,
     },
     Decl {
-        name: String,
+        value: Value,
         left: Box<Expr>,
     },
     Block(Vec<Expr>), // needed to manage scope
@@ -33,6 +33,25 @@ pub enum Expr {
 impl Expr {
     pub fn boxed(self) -> Box<Self> {
         Box::new(self)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Value {
+    name: String,
+    is_mutable: bool,
+}
+impl Value {
+    pub(super) fn new(name: String, is_mutable: bool) -> Self {
+        Self { name, is_mutable }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn is_mutable(&self) -> bool {
+        self.is_mutable
     }
 }
 

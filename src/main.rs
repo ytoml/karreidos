@@ -63,6 +63,7 @@ fn compile<'ctx>(
 ) -> compiler::Result<FunctionValue<'ctx>> {
     let builder = ctx.create_builder();
     let fpm = PassManager::create(module);
+    fpm.add_promote_memory_to_register_pass();
     fpm.add_instruction_combining_pass();
     fpm.add_reassociate_pass();
     fpm.add_gvn_pass(); // Eliminate Common SubExpressions

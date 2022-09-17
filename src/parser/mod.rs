@@ -2,7 +2,7 @@ pub mod ast;
 
 use std::collections::HashMap;
 
-use self::ast::Expr;
+use self::ast::{Expr, Value};
 use crate::lexer::token::Token;
 use crate::ANONYMOUS_FN_NAME;
 
@@ -19,7 +19,7 @@ pub enum ParseError {
 #[derive(Debug)]
 pub struct ProtoType {
     name: String,
-    args: Vec<String>,
+    args: Vec<Value>,
 }
 impl ProtoType {
     pub fn num_args(&self) -> usize {
@@ -30,8 +30,12 @@ impl ProtoType {
         self.name.as_str()
     }
 
-    pub fn arg_names_slice(&self) -> &[String] {
+    pub fn args_slice(&self) -> &[Value] {
         self.args.as_slice()
+    }
+
+    pub fn arg_names_iter(&self) -> impl Iterator<Item = &str> {
+        self.args.iter().map(|value| value.name())
     }
 }
 
@@ -134,13 +138,12 @@ impl Parser {
     }
 
     /// ```no_run
-    /// stmt := ( decl | expr | block ) ';'
+    /// stmt := (decl | expr | block)? ';'
     /// ```
     fn stmt(&mut self) -> Result<Option<Expr>> {
         // TODO: refine BNF
         let _ = self._consume_comment();
-        if self.current_is_single(';')? {
-            self.consume_single(';');
+        if self.consume_in_case_single(';')? {
             return Ok(None);
         }
         let expr = if self.current_is_let()? {
@@ -157,16 +160,23 @@ impl Parser {
     }
 
     /// ```no_run
-    /// decl := "let" ident "=" expr
+    /// decl := "let" var "=" expr
     /// ```
     fn decl(&mut self) -> Result<Expr> {
         self.consume_let();
-        let name = self.try_consume_ident()?;
-        log::debug!("decl: {name}");
+        let value = self.var()?;
         self.try_consume_single('=')?;
         let left = self.expr()?.boxed();
-        log::debug!("decl: {name} = {left:?}");
-        Ok(Expr::Decl { name, left })
+        Ok(Expr::Decl { value, left })
+    }
+
+    /// ```no_run
+    /// var := ("mut")? ident
+    /// ```
+    fn var(&mut self) -> Result<Value> {
+        let is_mutable = self.consume_in_case_mut()?;
+        let name = self.try_consume_ident()?;
+        Ok(Value::new(name, is_mutable))
     }
 
     /// ```no_run
@@ -194,8 +204,7 @@ impl Parser {
         self.try_consume_single('{')?;
         let mut stmts = vec![];
         loop {
-            if self.current_is_single('}')? {
-                self.consume_single('}');
+            if self.consume_in_case_single('}')? {
                 break;
             }
             if let Some(stmt) = self.stmt()? {
@@ -231,11 +240,11 @@ impl Parser {
     }
 
     /// ```no_run
-    /// for_expr := "for" ident "<-" expr ".." expr ',' expr block
+    /// for_expr := "for" var "<-" expr ".." expr ',' expr block
     /// ```
     fn for_expr(&mut self) -> Result<Expr> {
         self.consume_for();
-        let generatee = self.try_consume_ident()?;
+        let generatee = self.var()?;
         self.try_consume_double("<-")?;
         let start = self.expr()?.boxed();
         self.try_consume_double("..")?;
@@ -327,8 +336,7 @@ impl Parser {
     /// ```
     fn ident_expr(&mut self) -> Result<Expr> {
         let name = self.try_consume_ident()?;
-        if self.current_is_single('(')? {
-            self.pos += 1;
+        if self.consume_in_case_single('(')? {
             let mut args = Vec::new();
             loop {
                 if self.current_is_single(')')? {
@@ -349,7 +357,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// proto := ident '(' (ident ',')* ident ')'
+    /// proto := ident '(' (var ',')* ident ')'
     /// ```
     fn proto(&mut self) -> Result<ProtoType> {
         let name = self.try_consume_ident()?;
@@ -357,22 +365,16 @@ impl Parser {
         self.try_consume_single('(')?;
         loop {
             log::debug!("{:?}", self.current());
-            match self.expect()? {
-                Token::Ident(name) => {
-                    self.pos += 1;
-                    args.push(name);
-                    if !self.current_is_single(',')? {
-                        self.try_consume_single(')')?;
-                        break;
-                    }
-                    self.consume_single(',')
-                }
-                Token::Single(')') => {
-                    self.pos += 1;
-                    break;
-                }
-                tok => return Err(ParseError::Unexpected(tok)),
+            if self.consume_in_case_single(')')? {
+                break;
             }
+            let value = self.var()?;
+            args.push(value);
+            if !self.current_is_single(',')? {
+                self.try_consume_single(')')?;
+                break;
+            }
+            self.consume_single(',');
         }
         Ok(ProtoType { name, args })
     }
@@ -487,6 +489,19 @@ macro_rules! impl_consume {
                 fn [<try_consume_ $fn_suffix>](&mut self) -> Result<()> {
                     self._try_consume_specified(Token::$TokenVariant).map(|_| ())
                 }
+
+                #[allow(unused)]
+                #[inline]
+                fn [<current_is_ $fn_suffix>](&self) -> Result<bool> {
+                    Ok(self.expect()? == Token::$TokenVariant)
+                }
+
+                #[allow(unused)]
+                #[inline]
+                fn [<consume_in_case_ $fn_suffix>](&mut self) -> Result<bool> {
+                    self.[<current_is_ $fn_suffix>]()
+                        .map(|in_case| in_case.then(|| self.[<consume_ $fn_suffix>]()).is_some())
+                }
             )+
         }
     };
@@ -509,6 +524,13 @@ impl Parser {
     }
 
     #[inline]
+    fn consume_in_case_single(&mut self, c: char) -> Result<bool> {
+        // Err only in case no token left.
+        self.current_is_single(c)
+            .map(|is_single| is_single.then(|| self.consume_single(c)).is_some())
+    }
+
+    #[inline]
     fn try_consume_double(&mut self, s: &'static str) -> Result<()> {
         debug_assert!(
             s.chars().count() == 2,
@@ -523,16 +545,12 @@ impl Parser {
     }
 
     impl_consume! {
-        (fn, Fn),
-        (if, If),
-        (for, For),
         (extern, Extern),
-        (let, Let)
-    }
-
-    #[inline]
-    fn current_is_let(&self) -> Result<bool> {
-        Ok(self.expect()? == Token::Let)
+        (fn, Fn),
+        (for, For),
+        (if, If),
+        (let, Let),
+        (mut, Mut)
     }
 
     #[inline]

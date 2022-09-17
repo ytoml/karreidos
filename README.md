@@ -16,9 +16,10 @@ then, you can write some codes like:
 ?>> extern fn cos(x); // from standard C library
 ?>> fn func(arg) {
 ...     if arg < 10 {
-...         let i = 10;
-...         for v <- arg .. 100, 1 {
+...         let mut i = 10;
+...         for mut v <- arg .. 100, 1 {
 ...             i = i + v;
+...             v = v + 1; // number of repetition is not affected by this assignment
 ...         };
 ...         i;
 ...     } else {
@@ -44,6 +45,6 @@ Note that redefining variable in the same scope (block) is prohibited.
 
 ## To be implemented
 - [ ] Kaleidoscope itself.
-    current progress: chapter 3
+    current progress: chapter 7
 - [ ] Language server protocol
 - [ ] Port them using tree-sitter

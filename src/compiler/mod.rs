@@ -23,9 +23,15 @@ pub type Result<T> = std::result::Result<T, CompileError>;
 pub enum CompileError {
     Undefined(String, Type),
     Redefined(String, Type),
-    InvalidAssignment(Expr),
+    InvalidAssignment(InvalidAssignment),
     Fatal(Fatal),
     Other(String),
+}
+
+#[derive(Debug)]
+pub enum InvalidAssignment {
+    CannotBeLeft(Expr),
+    Immutable(String),
 }
 
 #[derive(Debug)]
@@ -41,6 +47,20 @@ pub enum Type {
     Argument,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Variable<'ctx> {
+    pointer_value: PointerValue<'ctx>,
+    is_mutable: bool,
+}
+impl<'ctx> Variable<'ctx> {
+    const fn new(pointer_value: PointerValue<'ctx>, is_mutable: bool) -> Self {
+        Self {
+            pointer_value,
+            is_mutable,
+        }
+    }
+}
+
 /// Compile per function.
 #[derive(Builder, Debug)]
 #[builder(name = "Compiler", build_fn(private, error = "CompileError"))]
@@ -53,8 +73,8 @@ pub struct IrGenerator<'a, 'ctx> {
     fpm: &'a PassManager<FunctionValue<'ctx>>,
     /// Manages variables.
     /// HashMap on back is current scope.
-    #[builder(default)]
-    variables: VecDeque<HashMap<String, PointerValue<'ctx>>>,
+    #[builder(default, private)]
+    variables: VecDeque<HashMap<String, Variable<'ctx>>>,
     // There is no way to set function in building process and always None at first.
     #[builder(setter(skip))]
     this_func: Option<FunctionValue<'ctx>>,
@@ -66,12 +86,19 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
             &Expr::Number(value) => Ok(self.ctx.f64_type().const_float(value)),
             Expr::Variable(name) => self
                 .get_variable(name)
-                .map(|pval| self.builder.build_load(*pval, name).into_float_value())
+                .map(|var| {
+                    self.builder
+                        .build_load(var.pointer_value, name)
+                        .into_float_value()
+                })
                 .ok_or_else(|| CompileError::Undefined(name.clone(), Type::Variable)),
-            Expr::Decl { name, left } => {
+            Expr::Decl { value, left } => {
                 let current_block = self.get_current_block();
-                let alloca = self.stack_alloca_in_block(name, current_block);
-                self.register_variable_at_current_scope(name.clone(), alloca)?;
+                let alloca = self.stack_alloca_in_block(value.name(), current_block);
+                self.register_variable_at_current_scope(
+                    value.name().to_string(),
+                    Variable::new(alloca, value.is_mutable()),
+                )?;
                 let value = self.expr_gen(left.as_ref())?;
                 self.builder.build_store(alloca, value);
                 // Declaration statement itself has no value (like Rust).
@@ -122,15 +149,23 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                         let var_name = match left.borrow() {
                             Expr::Variable(name) => name.clone(),
                             expr => {
-                                return Err(CompileError::InvalidAssignment(expr.clone()));
+                                return Err(CompileError::InvalidAssignment(
+                                    InvalidAssignment::CannotBeLeft(expr.clone()),
+                                ));
                             }
                         };
                         let expr_value = self.expr_gen(right.as_ref())?;
                         log::debug!("assignment: right value {expr_value}");
-                        let var_ptr = self
-                            .get_variable(&var_name)
-                            .ok_or(CompileError::Undefined(var_name, Type::Variable))?;
-                        let _ = self.builder.build_store(*var_ptr, expr_value);
+                        let ptr = match self.get_variable(&var_name) {
+                            Some(var) if var.is_mutable => var.pointer_value,
+                            Some(_) => {
+                                return Err(CompileError::InvalidAssignment(
+                                    InvalidAssignment::Immutable(var_name),
+                                ))
+                            }
+                            None => return Err(CompileError::Undefined(var_name, Type::Variable)),
+                        };
+                        let _ = self.builder.build_store(ptr, expr_value);
                         Ok(expr_value)
                     }
                     binop => unimplemented!("Unsupported bin op ({binop:?})"),
@@ -208,7 +243,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                 let start_value = self.expr_gen(start.as_ref())?;
                 let end_value = self.expr_gen(end.as_ref())?;
                 let step_value = self.expr_gen(step.as_ref())?;
-                let acc_alloca = self.stack_alloca_in_block(generatee, current_block);
+                let acc_alloca = self.stack_alloca_in_block(generatee.name(), current_block);
 
                 // Must ensure this jump is terminator for current block
                 self.goto_end_of_current_block();
@@ -218,7 +253,23 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
 
                 self.scope_up();
                 self.goto_start_of_block(for_block);
-                self.register_variable_at_current_scope(generatee.clone(), acc_alloca)?;
+                let generatee_alloca = if generatee.is_mutable() {
+                    // Prevent number of loops from changing even when generatee is mutable.
+                    // Like Rust, e.g.
+                    // ```for mut i <- 0..10, 1 { i = i + 1; };```
+                    // yields 10 repetitions.
+                    let alloca = self.stack_alloca_in_block(generatee.name(), for_block);
+                    let value = self.builder.build_load(acc_alloca, "muttmp");
+                    self.builder.build_store(alloca, value);
+                    alloca
+                } else {
+                    acc_alloca
+                };
+
+                self.register_variable_at_current_scope(
+                    generatee.name().to_string(),
+                    Variable::new(generatee_alloca, generatee.is_mutable()),
+                )?;
                 let for_value = self.block_gen(stmts, for_block)?;
                 self.builder.position_at_end(for_block);
                 let acc_value = self
@@ -274,8 +325,8 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
         let fn_val = self.module.add_function(proto.name(), fn_ty, None);
 
         // Not necessary but make IR more readable.
-        for (name, arg) in proto.arg_names_slice().iter().zip(fn_val.get_param_iter()) {
-            arg.into_float_value().set_name(name.as_str());
+        for (name, arg) in proto.arg_names_iter().zip(fn_val.get_param_iter()) {
+            arg.into_float_value().set_name(name);
         }
         Ok(fn_val)
     }
@@ -308,11 +359,14 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
 
         self.scope_up();
         self.variables.reserve(proto.num_args());
-        for (arg_name, arg) in proto.arg_names_slice().iter().zip(fn_val.get_param_iter()) {
-            log::debug!("{name}: add arg {arg_name}");
+        for (arg, arg_llvm) in proto.args_slice().iter().zip(fn_val.get_param_iter()) {
+            log::debug!("{name}: add arg {}", arg.name());
             let stack_alloca = self.entry_block_stack_alloca(name, &fn_val);
-            let _ = self.builder.build_store(stack_alloca, arg);
-            self.register_argument(arg_name.clone(), stack_alloca)?;
+            let _ = self.builder.build_store(stack_alloca, arg_llvm);
+            self.register_argument(
+                arg.name().to_string(),
+                Variable::new(stack_alloca, arg.is_mutable()),
+            )?;
         }
         if let Some(stmts) = function.body() {
             let return_value = self.block_gen(stmts, block)?;
@@ -379,7 +433,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     fn _register_at_current_scope(
         &mut self,
         name: String,
-        value: PointerValue<'ctx>,
+        value: Variable<'ctx>,
         ty: Type,
     ) -> Result<()> {
         let current_scope = self.variables.back_mut().expect("No scope is available.");
@@ -396,18 +450,18 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     fn register_variable_at_current_scope(
         &mut self,
         name: String,
-        value: PointerValue<'ctx>,
+        value: Variable<'ctx>,
     ) -> Result<()> {
         self._register_at_current_scope(name, value, Type::Variable)
     }
 
     #[inline]
-    fn register_argument(&mut self, name: String, value: PointerValue<'ctx>) -> Result<()> {
+    fn register_argument(&mut self, name: String, value: Variable<'ctx>) -> Result<()> {
         self._register_at_current_scope(name, value, Type::Argument)
     }
 
     #[inline]
-    fn get_variable(&self, name: &str) -> Option<&PointerValue<'ctx>> {
+    fn get_variable(&self, name: &str) -> Option<&Variable<'ctx>> {
         self.variables
             .iter()
             .rev()

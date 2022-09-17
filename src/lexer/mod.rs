@@ -203,7 +203,7 @@ mod tests {
     fn forloop() {
         const SRC: &str = r"
             fn main()
-                for i <- 1.0..10.2, 0.1 {
+                for mut i <- 1.0..10.2, 0.1 {
                     foo();
                 };
         ";
@@ -213,6 +213,7 @@ mod tests {
             Token::Single('('),
             Token::Single(')'),
             Token::For,
+            Token::Mut,
             Token::Ident("i".to_string()),
             Token::Double("<-"),
             Token::Num(1.0),

@@ -8,7 +8,11 @@ top_level_expr := stmt
 
 expr := primary bin_rhs
 
-stmt := expr ';'
+stmt := (decl | expr | block)? ';'
+
+decl := "let" var "=" expr
+
+var := ("mut")? ident
 
 primary := ident_expr
         | num_expr
@@ -21,20 +25,20 @@ block := '{' stmt* '}'
 conditional := "if" expr block
                ("else" (conditional | block)*
 
-for_expr := "for" ident "<-" expr ".." expr ',' expr block
+for_expr := "for" var "<-" expr ".." expr ',' expr block
 
 bin_rhs := (bin_op primary)*
 
 bin_op := /* refer to parser::ast::BinOp */
 
-num_expr := number
+num_expr := number /* only float for now */
 
 paren_expr := '(' expr ')'
 
 ident_expr := ident
             | ident '(' (expr ',')* (expr)? (',')?  ')'
 
-proto := ident '(' (ident ',')* ident ')'
+proto := ident '(' (var ',')* ident ')'
 
 func := "fn" proto block
 
