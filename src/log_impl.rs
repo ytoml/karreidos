@@ -4,9 +4,9 @@ use std::io::Write;
 use env_logger::fmt::Color;
 use log::Level;
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "debug")]
 const LEVEL: &str = "debug";
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "debug"))]
 const LEVEL: &str = "info";
 
 fn level_to_color(level: Level) -> Color {

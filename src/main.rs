@@ -12,7 +12,7 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::PassManager;
 use inkwell::targets::{InitializationConfig, Target};
-use inkwell::values::FunctionValue;
+use inkwell::values::{AnyValue, FunctionValue};
 use inkwell::OptimizationLevel;
 use lexer::Lexer;
 use parser::{Function, Parser};
@@ -130,11 +130,11 @@ fn run_interactive(ctx: Context) -> Result<()> {
         }
         let function = match parse(tokens) {
             Ok(Some(GlobalVar::Function(func))) => {
-                log::info!("{func:#?}");
+                log::debug!("{func:#?}");
                 func
             }
             Ok(None) => {
-                log::info!("Empty.");
+                log::debug!("Empty.");
                 continue;
             }
             Err(err) => {
@@ -144,8 +144,11 @@ fn run_interactive(ctx: Context) -> Result<()> {
         };
         match compile(&ctx, &module, &function) {
             Ok(func) => {
-                log::info!("Compile succeeded!");
-                log::info!("result:\n{func}");
+                log::debug!("Compile succeeded!");
+                log::debug!(
+                    "Generated IR: {}",
+                    func.print_to_string().to_string().trim_end()
+                );
 
                 // Anonymous function is "top level expression" and we evaluate it (JIT exec) immediately.
                 if function.is_anonymous() {
@@ -171,19 +174,21 @@ fn run_non_interactive(ctx: Context, file_name: &str) -> Result<()> {
     src_file.read_to_string(&mut src)?;
 
     let tokens = lex(&src)?;
-    log::info!("{tokens:#?}");
+    log::debug!("{tokens:#?}");
     let result = parse(tokens);
     let function = if let Ok(Some(GlobalVar::Function(func))) = result {
-        log::info!("{func:#?}");
+        log::debug!("{func:#?}");
         func
     } else {
         result?;
-        log::info!("Funtion with no content.");
+        log::debug!("Funtion with no content.");
         return Ok(());
     };
     let module = ctx.create_module(mod_name);
     let func = compile(&ctx, &module, &function)?;
-    log::info!("Compilation OK!:\n{func}");
+    log::info!("Compilation Succeeded!");
+    log::info!("Generated IR:");
+    func.print_to_stderr();
     Ok(())
 }
 
