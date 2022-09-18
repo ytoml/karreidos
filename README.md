@@ -3,8 +3,10 @@
 [Kaleidoscope](https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/index.html) in Rust but somewhat modified.
 
 Main differences from original Kaleidoscope:
-- function definition with `fn` instead of `def`
-- comment with `//` or `/* */`, not with `#`
+- Function definition with `fn` instead of `def`
+- Comment with `//` or `/* */`, not with `#`
+- Loop statement with genarator-like syntax (`for i <- 1..10, 1 { /* .. */ }`)
+- Pipe operator `/>`
 
 You can open REPL with:
 ```
@@ -14,6 +16,8 @@ cargo build --release
 then, you can write some codes like:
 ```karreidos
 ?>> extern fn cos(x); // from standard C library
+?>> fn add(x, y) { x + y; }
+?>> fn double(x) { x * 2; }
 ?>> fn func(arg) {
 ...     if arg < 10 {
 ...         let mut i = 10;
@@ -21,16 +25,17 @@ then, you can write some codes like:
 ...             i = i + v;
 ...             v = v + 1; // number of repetition is not affected by this assignment
 ...         };
-...         i;
+...         i /> add(3);
 ...     } else {
 ...         cos(arg);
-...     };
+...     }
+...         /> double();
 ... }
 ...
 ?>> func(9);
-[INFO] 4924  // 10 + sum(9..=99)
+[INFO] 9854  // (10 + sum(9..=99) + 3) * 2
 ?>> func(31.415926535);
-[INFO] 1     // approx cos(10pi)
+[INFO] 2     // cos(10pi) * 2
 ```
 Grammer is available <a href='./grammer.md'>here</a>.
 Note that redefining variable in the same scope (block) is prohibited.

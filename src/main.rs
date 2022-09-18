@@ -15,6 +15,7 @@ use inkwell::targets::{InitializationConfig, Target};
 use inkwell::values::{AnyValue, FunctionValue};
 use inkwell::OptimizationLevel;
 use lexer::Lexer;
+use parser::ast::BinOp;
 use parser::{Function, Parser};
 
 use crate::compiler::Compiler;
@@ -33,15 +34,16 @@ mod preprocessor;
 const ANONYMOUS_FN_NAME: &str = "__anonymous__"; // Empty string seems to be invalid for LLVM function name.
 type Result<T> = std::result::Result<T, Error>;
 
-fn get_prec() -> HashMap<char, i32> {
+fn get_prec() -> HashMap<BinOp, i32> {
     let mut prec = HashMap::with_capacity(7);
-    prec.insert('=', 0);
-    prec.insert('<', 10);
-    prec.insert('>', 10);
-    prec.insert('+', 20);
-    prec.insert('-', 20);
-    prec.insert('*', 40);
-    prec.insert('/', 40);
+    prec.insert(BinOp::Assign, 0);
+    prec.insert(BinOp::Pipe, 10);
+    prec.insert(BinOp::Lt, 20);
+    prec.insert(BinOp::Gt, 20);
+    prec.insert(BinOp::Add, 30);
+    prec.insert(BinOp::Sub, 30);
+    prec.insert(BinOp::Mul, 50);
+    prec.insert(BinOp::Div, 50);
     prec
 }
 

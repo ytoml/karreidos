@@ -24,6 +24,7 @@ pub enum CompileError {
     Undefined(String, Type),
     Redefined(String, Type),
     InvalidAssignment(InvalidAssignment),
+    InvalidArity { expected: usize, passed: usize },
     Fatal(Fatal),
     Other(String),
 }
@@ -175,8 +176,13 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                 let function = self
                     .get_function(callee)
                     .ok_or_else(|| CompileError::Undefined(callee.clone(), Type::Funtion))?;
+                let expected = function.count_params() as usize;
+                let passed = args.len();
+                if expected != passed {
+                    return Err(CompileError::InvalidArity { expected, passed });
+                }
                 let mut args_gen = Vec::with_capacity(args.len());
-                for arg in args {
+                for arg in args.iter() {
                     let arg_gen = self.expr_gen(arg)?;
                     args_gen.push(arg_gen);
                 }

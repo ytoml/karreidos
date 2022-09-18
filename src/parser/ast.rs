@@ -1,3 +1,10 @@
+use std::{
+    collections::VecDeque,
+    convert::{TryFrom, TryInto},
+};
+
+use crate::lexer::token::Token;
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Binary {
@@ -7,7 +14,7 @@ pub enum Expr {
     },
     Call {
         callee: String,
-        args: Vec<Expr>,
+        args: VecDeque<Expr>,
     },
     If {
         cond: Box<Expr>,
@@ -55,7 +62,7 @@ impl Value {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinOp {
     Lt,
     Gt,
@@ -64,12 +71,42 @@ pub enum BinOp {
     Div,
     Mul,
     Assign,
-    _LShift,
-    _RShift,
-    _AddAssign,
-    _SubAssign,
-    _MulAssign,
-    _DivAssign,
+    Pipe, // `/>`
+    LShift,
+    RShift,
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+}
+
+impl TryFrom<Token> for BinOp {
+    type Error = Token;
+    fn try_from(token: Token) -> Result<Self, Self::Error> {
+        let op = match token {
+            Token::Single(c) => c.try_into().map_err(Token::Single)?,
+            Token::Double(s) => s.try_into().map_err(Token::Double)?,
+            _ => return Err(token),
+        };
+        Ok(op)
+    }
+}
+
+impl<'a> TryFrom<&'a str> for BinOp {
+    type Error = &'a str;
+    fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+        let op = match s {
+            "/>" => Self::Pipe,
+            "<<" => Self::LShift,
+            ">>" => Self::RShift,
+            "+=" => Self::AddAssign,
+            "-=" => Self::SubAssign,
+            "*=" => Self::MulAssign,
+            "/=" => Self::DivAssign,
+            _ => return Err(s),
+        };
+        Ok(op)
+    }
 }
 
 impl TryFrom<char> for BinOp {

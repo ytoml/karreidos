@@ -1,8 +1,10 @@
 pub mod ast;
+mod desugar;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::convert::TryInto;
 
-use self::ast::{Expr, Value};
+use self::ast::{BinOp, Expr, Value};
 use crate::lexer::token::Token;
 use crate::ANONYMOUS_FN_NAME;
 
@@ -13,6 +15,7 @@ pub enum ParseError {
     Unexpected(Token),
     TokenShortage,
     Unimplemented,
+    NonCallableAtPipeRhs(Expr),
     Reserved(&'static str),
 }
 
@@ -75,12 +78,12 @@ pub struct Parser {
     tokens: Vec<Token>,
     // for binop precedence, but key is char
     // because [`BinOp`] is created through parsing
-    prec: HashMap<char, i32>,
+    prec: HashMap<BinOp, i32>,
     pos: usize,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>, prec: HashMap<char, i32>) -> Self {
+    pub fn new(tokens: Vec<Token>, prec: HashMap<BinOp, i32>) -> Self {
         Self {
             tokens,
             prec,
@@ -262,7 +265,7 @@ impl Parser {
     }
 
     fn current_precedence(&self) -> Option<i32> {
-        if let Some(Token::Single(op)) = self.current() {
+        if let Ok(op) = self.current()?.try_into() {
             self.prec.get(&op).copied()
         } else {
             None
@@ -279,25 +282,26 @@ impl Parser {
             let tok_prec = self.current_precedence();
             if matches!(tok_prec, Some(p) if p >= precedence) {
                 let tok_prec = tok_prec.unwrap();
-                if let Token::Single(op) = self.consume() {
-                    let mut rhs = self.primary()?;
-                    // in case form of:
-                    //     bin_op1 primary bin_op2 primary ..
-                    // If prec(bin_op1) < prec(bin_op2), "primary bin_op2 primary .. " must be
-                    // merged first, thus regarding "primary bin_op2 primary" as bin_rhs.
-                    // Otherwise, we can greedily merge "primary bin_op1 primary" first.
-                    if matches!(self.current_precedence(), Some(p) if p > tok_prec) {
-                        rhs = self.bin_rhs(tok_prec + 1, rhs)?;
-                    }
-                    // XXX: currently skipping check of operator, thus might cause panic.
-                    lhs = Expr::Binary {
-                        op: op.try_into().unwrap(),
+                let op = self.consume().try_into().unwrap();
+                let mut rhs = self.primary()?;
+                // in case form of:
+                //     bin_op1 primary bin_op2 primary ..
+                // If prec(bin_op1) < prec(bin_op2), "primary bin_op2 primary .. " must be
+                // merged first, thus regarding "primary bin_op2 primary" as bin_rhs.
+                // Otherwise, we can greedily merge "primary bin_op1 primary" first.
+                if matches!(self.current_precedence(), Some(p) if p > tok_prec) {
+                    rhs = self.bin_rhs(tok_prec + 1, rhs)?;
+                }
+
+                lhs = if op == BinOp::Pipe {
+                    desugar::desugar_pipe(lhs, rhs)?
+                } else {
+                    Expr::Binary {
+                        op,
                         left: Box::new(lhs),
                         right: Box::new(rhs),
-                    };
-                } else {
-                    unreachable!()
-                }
+                    }
+                };
             } else {
                 return Ok(lhs);
             }
@@ -337,13 +341,13 @@ impl Parser {
     fn ident_expr(&mut self) -> Result<Expr> {
         let name = self.try_consume_ident()?;
         if self.consume_in_case_single('(')? {
-            let mut args = Vec::new();
+            let mut args = VecDeque::new();
             loop {
                 if self.current_is_single(')')? {
                     break;
                 }
                 let expr = self.expr()?;
-                args.push(expr);
+                args.push_back(expr);
                 if !self.current_is_single(',')? {
                     break;
                 }

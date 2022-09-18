@@ -89,8 +89,12 @@ impl<'a> Lexer<'a> {
                     }
                 }
             }
-            // Can be div/comment/block comment (or div-assign in future)
             '/' => match chars.peek() {
+                Some('>') => {
+                    let _ = chars.next().unwrap();
+                    pos += 1;
+                    Ok(Token::Double("/>"))
+                }
                 Some('/') => {
                     loop {
                         match chars.peek() {
@@ -200,18 +204,20 @@ mod tests {
     }
 
     #[test]
-    fn forloop() {
+    fn range() {
         const SRC: &str = r"
-            fn main()
+            fn main() {
                 for mut i <- 1.0..10.2, 0.1 {
                     foo();
                 };
+            }
         ";
         let expected_tokens = vec![
             Token::Fn,
             Token::Ident("main".to_string()),
             Token::Single('('),
             Token::Single(')'),
+            Token::Single('{'),
             Token::For,
             Token::Mut,
             Token::Ident("i".to_string()),
@@ -228,6 +234,48 @@ mod tests {
             Token::Single(';'),
             Token::Single('}'),
             Token::Single(';'),
+            Token::Single('}'),
+        ];
+        expect_success(SRC, expected_tokens)
+    }
+
+    #[test]
+    fn pipe() {
+        const SRC: &str = r"
+            fn main() {
+                let mut x = 10;
+                x /> foo()
+                    /> bar()
+                    /> foobar();
+            }
+        ";
+        let expected_tokens = vec![
+            Token::Fn,
+            Token::Ident("main".to_string()),
+            Token::Single('('),
+            Token::Single(')'),
+            Token::Single('{'),
+            Token::Let,
+            Token::Mut,
+            Token::Ident("x".to_string()),
+            Token::Single('='),
+            Token::Num(10.),
+            Token::Single(';'),
+            Token::Ident("x".to_string()),
+            Token::Double("/>"),
+            Token::Ident("foo".to_string()),
+            Token::Single('('),
+            Token::Single(')'),
+            Token::Double("/>"),
+            Token::Ident("bar".to_string()),
+            Token::Single('('),
+            Token::Single(')'),
+            Token::Double("/>"),
+            Token::Ident("foobar".to_string()),
+            Token::Single('('),
+            Token::Single(')'),
+            Token::Single(';'),
+            Token::Single('}'),
         ];
         expect_success(SRC, expected_tokens)
     }
