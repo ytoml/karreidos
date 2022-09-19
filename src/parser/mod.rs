@@ -92,9 +92,9 @@ impl Parser {
     }
 
     /// ```no_run
-    /// program := top_level_expr
-    ///         | ext
-    ///         | func
+    /// program ::= top_level_expr
+    ///          | ext
+    ///          | func
     /// ```
     pub fn parse(&mut self) -> Result<Option<GlobalVar>> {
         if let Some(tok) = self.current() {
@@ -115,7 +115,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// top_level_expr := stmt
+    /// top_level_expr ::= stmt
     /// ```
     fn top_level_expr(&mut self) -> Result<Function> {
         let mut exprs = vec![];
@@ -133,7 +133,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// expr := primary bin_rhs
+    /// expr ::= primary bin_rhs
     /// ```
     fn expr(&mut self) -> Result<Expr> {
         let lhs = self.primary()?;
@@ -141,7 +141,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// stmt := (decl | expr | block)? ';'
+    /// stmt ::= (decl | expr | block)? ';'
     /// ```
     fn stmt(&mut self) -> Result<Option<Expr>> {
         // TODO: refine BNF
@@ -163,8 +163,10 @@ impl Parser {
     }
 
     /// ```no_run
-    /// decl := "let" var "=" expr
+    /// decl ::= "let" var "=" expr
     /// ```
+    /// # Panics
+    /// If current head token is not 'let'.
     fn decl(&mut self) -> Result<Expr> {
         self.consume_let();
         let value = self.var()?;
@@ -174,7 +176,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// var := ("mut")? ident
+    /// var ::= ("mut")? ident
     /// ```
     fn var(&mut self) -> Result<Value> {
         let is_mutable = self.consume_in_case_mut()?;
@@ -183,11 +185,11 @@ impl Parser {
     }
 
     /// ```no_run
-    /// primary := ident_expr
-    ///         | num_expr
-    ///         | paren_expr
-    ///         | contional
-    ///         | for_expr
+    /// primary ::= ident_expr
+    ///          | num_expr
+    ///          | paren_expr
+    ///          | contional
+    ///          | for_expr
     /// ```
     fn primary(&mut self) -> Result<Expr> {
         match self.expect()? {
@@ -201,8 +203,10 @@ impl Parser {
     }
 
     /// ```no_run
-    /// block := '{' stmt* '}'
+    /// block ::= '{' stmt* '}'
     /// ```
+    /// # Panics
+    /// If current head token is not '{'.
     fn block(&mut self) -> Result<Vec<Expr>> {
         self.try_consume_single('{')?;
         let mut stmts = vec![];
@@ -218,9 +222,11 @@ impl Parser {
     }
 
     /// ```no_run
-    /// conditional := "if" expr block
+    /// conditional ::= "if" expr block
     ///                ("else" (conditional | block)*
     /// ```
+    /// # Panics
+    /// If current head token is not 'if'.
     fn conditional(&mut self) -> Result<Expr> {
         self.consume_if();
         let cond = self.expr()?.boxed();
@@ -243,8 +249,10 @@ impl Parser {
     }
 
     /// ```no_run
-    /// for_expr := "for" var "<-" expr ".." expr ',' expr block
+    /// for_expr ::= "for" var "<-" expr ".." expr ',' expr block
     /// ```
+    /// # Panics
+    /// If current head token is not 'for'.
     fn for_expr(&mut self) -> Result<Expr> {
         self.consume_for();
         let generatee = self.var()?;
@@ -273,8 +281,8 @@ impl Parser {
     }
 
     /// ```no_run
-    /// bin_rhs := (bin_op primary)*
-    /// bin_op := /* refer to BinOp */
+    /// bin_rhs ::= (bin_op primary)*
+    /// bin_op ::= /* refer to BinOp */
     /// ```
     fn bin_rhs(&mut self, precedence: i32, mut lhs: Expr) -> Result<Expr> {
         loop {
@@ -309,7 +317,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// num_expr := number
+    /// num_expr ::= number
     ///
     /// ```
     fn num_expr(&mut self) -> Result<Expr> {
@@ -322,7 +330,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// paren_expr := '(' expr ')'
+    /// paren_expr ::= '(' expr ')'
     ///
     /// ```
     /// # Panics
@@ -335,8 +343,8 @@ impl Parser {
     }
 
     /// ```no_run
-    /// ident_expr := ident
-    ///             | ident '(' (expr ',')* (expr)? (',')?  ')'
+    /// ident_expr ::= ident
+    ///              | ident '(' (expr ',')* (expr)? (',')?  ')'
     /// ```
     fn ident_expr(&mut self) -> Result<Expr> {
         let name = self.try_consume_ident()?;
@@ -361,7 +369,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// proto := ident '(' (var ',')* ident ')'
+    /// proto ::= ident '(' (var ',')* ident ')'
     /// ```
     fn proto(&mut self) -> Result<ProtoType> {
         let name = self.try_consume_ident()?;
@@ -384,7 +392,7 @@ impl Parser {
     }
 
     /// ```no_run
-    /// func := "fn" proto block
+    /// func ::= "fn" proto block
     /// ```
     /// # Panics
     /// If current head token is not 'fn'.
@@ -402,10 +410,12 @@ impl Parser {
 
     // Extern declaration must be done with no contents.
     /// ```no_run
-    /// ext := "extern" "fn" proto ";"
+    /// ext ::= "extern" "fn" proto ";"
     /// ```
+    /// # Panics
+    /// If current head token is not 'extern'.
     fn ext(&mut self) -> Result<Function> {
-        self.try_consume_extern().unwrap();
+        self.consume_extern();
         self.try_consume_fn()?;
         let proto = self.proto()?;
         self.try_consume_single(';')?;
@@ -479,7 +489,7 @@ impl Parser {
 }
 
 macro_rules! impl_consume {
-    ($(($fn_suffix:ident, $TokenVariant:ident)),+ $(,)?) => {
+    ($(($fn_suffix:ident, $TokenVariant:ident, $doc_ident:literal $(,)?)),+ $(,)?) => {
         paste::paste!{
                 $(
                 #[allow(unused)]
@@ -502,6 +512,9 @@ macro_rules! impl_consume {
 
                 #[allow(unused)]
                 #[inline]
+                #[doc = "Consume current token only if it's `"]
+                #[doc = $doc_ident]
+                #[doc = "`. Note that this function returns `Err` only if no token is left."]
                 fn [<consume_in_case_ $fn_suffix>](&mut self) -> Result<bool> {
                     self.[<current_is_ $fn_suffix>]()
                         .map(|in_case| in_case.then(|| self.[<consume_ $fn_suffix>]()).is_some())
@@ -528,6 +541,8 @@ impl Parser {
     }
 
     #[inline]
+    /// Consume current token only if it's [`Token::Single`] corresponds to [`c`].
+    /// "Note that this function returns `Err` only if no token is left."]
     fn consume_in_case_single(&mut self, c: char) -> Result<bool> {
         // Err only in case no token left.
         self.current_is_single(c)
@@ -549,12 +564,12 @@ impl Parser {
     }
 
     impl_consume! {
-        (extern, Extern),
-        (fn, Fn),
-        (for, For),
-        (if, If),
-        (let, Let),
-        (mut, Mut)
+        (extern, Extern, "extern"),
+        (fn, Fn, "fn"),
+        (for, For, "for"),
+        (if, If, "if"),
+        (let, Let, "let"),
+        (mut, Mut, "mut")
     }
 
     #[inline]

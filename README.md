@@ -29,7 +29,7 @@ then, you can write some codes like:
 ...     } else {
 ...         cos(arg);
 ...     }
-...         /> double();
+...     /> double();
 ... }
 ...
 ?>> func(9);
