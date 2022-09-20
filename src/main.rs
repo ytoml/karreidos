@@ -5,13 +5,15 @@ extern crate derive_builder;
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{self, Read};
+use std::io::{self, BufWriter, Read, Write};
 
-use cli_impl::Run;
+use cli_impl::{Emit, Run};
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::PassManager;
-use inkwell::targets::{InitializationConfig, Target};
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
+};
 use inkwell::values::{AnyValue, FunctionValue};
 use inkwell::OptimizationLevel;
 use lexer::Lexer;
@@ -62,6 +64,7 @@ fn compile<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     function: &Function,
+    target: Option<&TargetMachine>,
 ) -> compiler::Result<FunctionValue<'ctx>> {
     let builder = ctx.create_builder();
     let fpm = PassManager::create(module);
@@ -72,12 +75,19 @@ fn compile<'ctx>(
     fpm.add_cfg_simplification_pass();
     fpm.initialize();
 
-    Compiler::default()
+    let mut compiler = Compiler::default();
+    compiler
         .builder(&builder)
         .context(ctx)
         .module(module)
         .function_pass_manager(&fpm)
-        .compile(function)
+        .emit_obj(target.is_some());
+
+    if let Some(target) = target {
+        compiler.compile_with_target(function, target)
+    } else {
+        compiler.compile(function)
+    }
 }
 
 fn eval_anonymous_func(
@@ -94,6 +104,16 @@ fn eval_anonymous_func(
 }
 
 fn run_interactive(ctx: Context) -> Result<()> {
+    let config = InitializationConfig {
+        base: true,
+        asm_parser: true,
+        asm_printer: true,
+        disassembler: false,
+        info: false,
+        machine_code: false,
+    };
+    Target::initialize_all(&config);
+
     let mut all_expr = Vec::new();
     'main: loop {
         eprint!("?>> ");
@@ -105,7 +125,7 @@ fn run_interactive(ctx: Context) -> Result<()> {
 
         // Adding previous functions to new module is needed (reason is explained above).
         for function in all_expr.iter() {
-            let _ = compile(&ctx, &module, function)
+            let _ = compile(&ctx, &module, function, None)
                 .expect("Failed to compile function which was previously compiled successfully.");
         }
 
@@ -144,7 +164,7 @@ fn run_interactive(ctx: Context) -> Result<()> {
                 continue;
             }
         };
-        match compile(&ctx, &module, &function) {
+        match compile(&ctx, &module, &function, None) {
             Ok(func) => {
                 log::debug!("Compile succeeded!");
                 log::debug!(
@@ -166,14 +186,78 @@ fn run_interactive(ctx: Context) -> Result<()> {
     Ok(())
 }
 
-fn run_non_interactive(ctx: Context, file_name: &str) -> Result<()> {
-    let mod_name = file_name
+/// Compile source and emit.
+/// # Panics
+/// If [`output_file.is_none() && emit_obj`] is [`true`] (internal error).
+fn run_non_interactive(
+    ctx: Context,
+    src_file: &str,
+    output_file: Option<String>,
+    emit: Option<Emit>,
+    triple: Option<String>,
+) -> Result<()> {
+    if !src_file.ends_with(".krr") {
+        log::warn!("file `{src_file}` seems not to be Karreidos source file. Is it really OK to compile this texts?(y/n)");
+        loop {
+            let mut input = String::new();
+            io::stdin()
+                .read_line(&mut input)
+                .expect("Could not read from stdin.");
+            match input.trim() {
+                "y" => break,
+                "n" => {
+                    log::info!("Abort compilation.");
+                    return Ok(());
+                }
+                _ => log::warn!("Specify y or n."),
+            }
+        }
+    }
+    let mod_name = src_file
         .find('.')
-        .map(|i| &file_name[..i])
-        .unwrap_or(file_name);
-    let mut src_file = OpenOptions::new().read(true).open(file_name)?;
+        .map(|i| &src_file[..i])
+        .unwrap_or(src_file);
+    let mut src_file = OpenOptions::new().read(true).open(src_file)?;
     let mut src = String::new();
     src_file.read_to_string(&mut src)?;
+
+    let module = ctx.create_module(mod_name);
+    let target = if emit.is_some() {
+        let config = InitializationConfig {
+            base: true,
+            asm_parser: true,
+            asm_printer: true,
+            disassembler: false,
+            info: true, // need to get Target from triple etc.
+            machine_code: true,
+        };
+        Target::initialize_all(&config);
+        let (triple, cpu) = if let Some(triple) = triple.as_deref() {
+            (TargetTriple::create(triple), String::from("generic"))
+        } else {
+            (
+                TargetMachine::get_default_triple(),
+                TargetMachine::get_host_cpu_name().to_string(),
+            )
+        };
+        log::debug!("Target cpu: {cpu}");
+        log::debug!("Target triple: {}", triple.to_string());
+        let target =
+            Target::from_triple(&triple).map_err(|_| Error::InvalidTarget(triple.to_string()))?;
+        let target_machine = target
+            .create_target_machine(
+                &triple,
+                &cpu,
+                "",
+                OptimizationLevel::Default,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| Error::InvalidTarget(triple.to_string()))?;
+        Some(target_machine)
+    } else {
+        None
+    };
 
     let tokens = lex(&src)?;
     log::debug!("{tokens:#?}");
@@ -186,38 +270,62 @@ fn run_non_interactive(ctx: Context, file_name: &str) -> Result<()> {
         log::debug!("Funtion with no content.");
         return Ok(());
     };
-    let module = ctx.create_module(mod_name);
-    let func = compile(&ctx, &module, &function)?;
+    let func = compile(&ctx, &module, &function, target.as_ref())?;
     log::info!("Compilation Succeeded!");
-    log::info!("Generated IR:");
-    func.print_to_stderr();
+    match (emit, output_file) {
+        (Some(Emit::Obj), Some(output_file)) => {
+            let target = target.unwrap();
+            target
+                .write_to_file(&module, FileType::Object, output_file.as_ref())
+                .map_err(|s| Error::OutputToFileFailed(s.to_string()))?;
+        }
+        (Some(Emit::Asm), output_file) => {
+            let target = target.unwrap();
+            if let Some(output_file) = output_file {
+                target
+                    .write_to_file(&module, FileType::Assembly, output_file.as_ref())
+                    .map_err(|s| Error::OutputToFileFailed(s.to_string()))?;
+            } else {
+                let buf = target
+                    .write_to_memory_buffer(&module, FileType::Assembly)
+                    .map_err(|s| Error::OutputToFileFailed(s.to_string()))?;
+                let asm = String::from_utf8_lossy(buf.as_slice()).to_string();
+                log::info!("Generated ASM:\n{asm}");
+            }
+        }
+        (None, output_file) => {
+            let llvm_ir = func.print_to_string().to_string();
+            if let Some(file) = output_file.as_deref() {
+                let file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(file)?;
+                let mut writer = BufWriter::new(file);
+                writer.write_all(llvm_ir.as_bytes())?;
+            } else {
+                log::info!("Generated IR:\n{llvm_ir}");
+            }
+        }
+        _ => unreachable!(), // Invalid combination of Some(Emit::Obj) and None(no output file) is already checked in cli_impl
+    }
     Ok(())
 }
 
 fn main() -> Result<()> {
     log_impl::init_logger();
 
-    let config = InitializationConfig {
-        base: true,
-        asm_parser: true,
-        asm_printer: true,
-        disassembler: false,
-        info: false,
-        machine_code: false,
-    };
-
-    #[cfg(target_arch = "aarch64")]
-    Target::initialize_aarch64(&config);
-
-    #[cfg(not(target_arch = "aarch64"))]
-    log::warn!("Jit for non-aarch64 is currently not supported!");
-
     let ctx = Context::create();
-    match cli_impl::parse_arguments() {
+    match cli_impl::parse_arguments()? {
         Run::Interactive => run_interactive(ctx),
-        Run::NonInteractive(files) => match files.len() {
+        Run::NonInteractive {
+            src_files,
+            output_file,
+            emit,
+            triple,
+        } => match src_files.len() {
             0 => Err(Error::NoSourceProvided),
-            1 => run_non_interactive(ctx, files[0].as_str()),
+            1 => run_non_interactive(ctx, src_files[0].as_str(), output_file, emit, triple),
             _ => {
                 log::error!("Currently, more than single file is not supported.");
                 Ok(())

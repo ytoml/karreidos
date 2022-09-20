@@ -4,18 +4,16 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::{PassManager, PassManagerSubType};
+use inkwell::targets::TargetMachine;
 use inkwell::types::BasicMetadataTypeEnum;
-use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, FloatValue, FunctionValue, PointerValue,
-};
+use inkwell::values::{BasicMetadataValueEnum, FloatValue, FunctionValue, PointerValue};
 use inkwell::FloatPredicate;
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 
-use crate::parser::{Function, ProtoType};
-// use derive_builder::Builder;
 use crate::parser::ast::{BinOp, Expr};
+use crate::parser::{Function, ProtoType};
 
 pub type Result<T> = std::result::Result<T, CompileError>;
 
@@ -79,6 +77,8 @@ pub struct IrGenerator<'a, 'ctx> {
     // There is no way to set function in building process and always None at first.
     #[builder(setter(skip))]
     this_func: Option<FunctionValue<'ctx>>,
+    #[builder(default = "false")]
+    emit_obj: bool,
 }
 
 impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
@@ -544,14 +544,42 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
 
 impl<'a, 'ctx> Compiler<'a, 'ctx> {
     pub fn compile(&'a self, function: &Function) -> Result<FunctionValue<'ctx>> {
-        match self.build()?.function_gen(function) {
-            Err(CompileError::Fatal(fata)) => {
-                panic!("Fatal: {fata:?}");
-            }
-            res => res,
+        let compiler = self.build()?;
+        compile(compiler, function)
+    }
+
+    /// Run compiler with target information through [`TargetMachine`].
+    /// # Panics
+    /// If [`emit_obj`] is toggled to [`true`] in builder chain.
+    pub fn compile_with_target(
+        &'a self,
+        function: &Function,
+        target: &TargetMachine,
+    ) -> Result<FunctionValue<'ctx>> {
+        let compiler = self.build()?;
+        let data_layout = target.get_target_data().get_data_layout();
+        let triple = target.get_triple();
+        compiler.module.set_data_layout(&data_layout);
+        compiler.module.set_triple(&triple);
+        if !compiler.emit_obj {
+            panic!("Please set emit_obj to true.");
         }
+        compile(compiler, function)
     }
 }
+
+fn compile<'ctx>(
+    mut compiler: IrGenerator<'_, 'ctx>,
+    function: &Function,
+) -> Result<FunctionValue<'ctx>> {
+    match compiler.function_gen(function) {
+        Err(CompileError::Fatal(fata)) => {
+            panic!("Fatal: {fata:?}");
+        }
+        res => res,
+    }
+}
+
 impl From<UninitializedFieldError> for CompileError {
     fn from(err: UninitializedFieldError) -> Self {
         Self::Fatal(Fatal::CompilerBuild(err))
