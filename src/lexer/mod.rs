@@ -2,7 +2,7 @@ use std::{iter::Peekable, ops::DerefMut, str::Chars};
 
 pub mod token;
 
-use self::token::{available_in_ident, available_in_num, can_be_head_of_ident, Token};
+use self::token::{Token, TokenInfo};
 
 #[derive(Debug)]
 pub enum LexError {
@@ -10,21 +10,26 @@ pub enum LexError {
 }
 
 pub type Result<T> = std::result::Result<T, LexError>;
-type LexResult = Result<Token>;
+type LexResult = Result<TokenInfo>;
 
 #[derive(Debug)]
 pub struct Lexer<'a> {
     src: &'a str,
     chars: Box<Peekable<Chars<'a>>>,
     pos: usize,
+    line: u32,
+    col: u32,
 }
 
 impl<'a> Lexer<'a> {
+    #[inline]
     pub fn new(src: &'a str) -> Self {
         Self {
             src,
             chars: Box::new(src.chars().peekable()),
             pos: 0,
+            line: 1,
+            col: 1,
         }
     }
 
@@ -34,42 +39,52 @@ impl<'a> Lexer<'a> {
 
         // read until non-whitespace or EOF
         loop {
-            if let Some(c) = chars.peek() {
+            if let Some(&c) = chars.peek() {
                 if !c.is_whitespace() {
                     break;
+                }
+                if c == '\n' {
+                    self.line += 1;
+                    self.col = 0;
                 }
                 let _ = chars.next().unwrap();
             } else {
                 self.pos = pos;
-                return Ok(Token::Eof);
+                return Ok(Token::Eof.with_src_info(self.line, self.col));
             }
             pos += 1;
+            self.col += 1;
         }
 
-        // know that next non-whitespace exists here.
         let start = pos;
         pos += 1;
-        let result = match chars.next().unwrap() {
-            c if can_be_head_of_ident(c) => {
+        let mut line = self.line;
+        let mut col = self.col;
+        col += 1;
+        // know that next non-whitespace exists here.
+        let token = match chars.next().unwrap() {
+            c if token::can_be_head_of_ident(c) => {
                 loop {
                     match chars.peek() {
-                        Some(&c) if available_in_ident(c) => {
+                        Some(&c) if token::available_in_ident(c) => {
                             // valid for identifier
                             let _ = chars.next().unwrap();
                             pos += 1;
+                            col += 1;
                         }
                         Some(_) | None => break,
                     }
                 }
                 let tok = &self.src[start..pos];
                 // We know it's alreadly confirmed tok is non-empty and valid thus can be unwrapped.
-                Ok(tok.try_into().unwrap())
+                tok.try_into().unwrap()
             }
-            c if available_in_num(c) => {
+            c if token::available_in_num(c) => {
                 if c == '.' && Some(&'.') == chars.peek() {
                     let _ = chars.next().unwrap();
                     pos += 1;
-                    Ok(Token::Double(".."))
+                    col += 1;
+                    Token::Double("..")
                 } else {
                     loop {
                         match chars.peek() {
@@ -78,14 +93,15 @@ impl<'a> Lexer<'a> {
                             {
                                 // ".." will be parsed next time.
                             }
-                            Some(&c) if available_in_num(c) => {
+                            Some(&c) if token::available_in_num(c) => {
                                 let _ = chars.next().unwrap();
                                 pos += 1;
+                                col += 1;
                                 continue;
                             }
                             _ => {}
                         }
-                        break Ok(Token::Num(self.src[start..pos].parse().unwrap()));
+                        break Token::Num(self.src[start..pos].parse().unwrap());
                     }
                 }
             }
@@ -93,7 +109,8 @@ impl<'a> Lexer<'a> {
                 Some('>') => {
                     let _ = chars.next().unwrap();
                     pos += 1;
-                    Ok(Token::Double("/>"))
+                    col += 1;
+                    Token::Double("/>")
                 }
                 Some('/') => {
                     loop {
@@ -101,56 +118,76 @@ impl<'a> Lexer<'a> {
                             Some(&c) => {
                                 let _ = chars.next().unwrap();
                                 pos += 1;
+                                col += 1;
                                 if c == '\n' {
-                                    break;
+                                    line += 1;
+                                    col = 1;
+                                    break Token::Comment;
                                 }
                             }
                             None => {
                                 // Eof must be on next call.
-                                return Ok(Token::Comment);
+                                break Token::Comment;
                             }
                         }
                     }
-                    Ok(Token::Comment)
                 }
                 Some('*') => {
                     let _ = chars.next().unwrap();
                     pos += 1;
+                    col += 1;
                     loop {
                         match chars.next() {
                             Some('*') => {
                                 pos += 1;
+                                col += 1;
                                 if let Some(&'/') = chars.peek() {
                                     let _ = chars.next().unwrap();
                                     pos += 1;
+                                    col += 1;
                                     break;
                                 }
                             }
-                            Some(_) => pos += 1,
+                            Some(c) => {
+                                if c == '\n' {
+                                    line += 1;
+                                    col = 1;
+                                } else {
+                                    col += 1;
+                                }
+                                pos += 1;
+                            }
                             None => return Err(LexError::BlockCommentNotTerminated),
                         }
                     }
-                    Ok(Token::Comment)
+                    Token::Comment
                 }
-                Some(_) | None => Ok(Token::Single('/')),
+                Some(_) | None => Token::Single('/'),
             },
             '<' if matches!(chars.peek(), Some(&'-')) => {
                 let _ = chars.next().unwrap();
                 pos += 1;
-                Ok(Token::Double("<-"))
+                col += 1;
+                Token::Double("<-")
             }
-            c => Ok(Token::Single(c)),
-        };
+            c => Token::Single(c),
+        }
+        .with_src_info(self.line, self.col);
         self.pos = pos;
-        result
+        self.line = line;
+        self.col = col;
+        Ok(token)
     }
 }
 
 impl<'a> Iterator for Lexer<'a> {
     type Item = LexResult;
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         match self.get_token() {
-            Ok(Token::Eof) => None,
+            Ok(TokenInfo {
+                token: Token::Eof, ..
+            }) => None,
             res => Some(res),
         }
     }
@@ -160,7 +197,10 @@ impl<'a> Iterator for Lexer<'a> {
 mod tests {
     use super::*;
     fn expect_success(src: &'static str, expected_tokens: Vec<Token>) {
-        let result: Result<Vec<Token>> = Lexer::new(src).into_iter().collect();
+        let result: Result<Vec<Token>> = Lexer::new(src)
+            .into_iter()
+            .map(|res| res.map(|info| info.token))
+            .collect();
         assert_eq!(result.expect("lex failed."), expected_tokens,);
     }
 

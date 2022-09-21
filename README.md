@@ -41,6 +41,10 @@ Or you can generate LLVM-IR with source files:
 ```shell
 ./target/release/karreidos /path/to/src.krr -o /path/to/output.ll
 ```
+with debug info (but incomplete feature):
+```shell
+./target/release/karreidos /path/to/src.krr --debug-info -o /path/to/output.ll
+```
 Also, you can emit object file or assembly:
 ```
 ./target/release/karreidos /path/to/src.krr --emit obj -o /path/to/output.out
@@ -62,6 +66,6 @@ Note that redefining variable in the same scope (block) is prohibited.
 ```
 ## To be implemented
 - [ ] Kaleidoscope itself.
-    current progress: chapter 8
+    current progress: chapter 9
 - [ ] Language server protocol
 - [ ] Port them using tree-sitter

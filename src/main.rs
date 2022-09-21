@@ -1,4 +1,4 @@
-// This implelmentation thanks to
+// This implelmentation follows:
 // https://github.com/TheDan64/inkwell/blob/56b01589448dc7978451c08c5d5c5294b11bdb4d/examples/kaleidoscope/main.rs
 #[macro_use]
 extern crate derive_builder;
@@ -16,14 +16,17 @@ use inkwell::targets::{
 };
 use inkwell::values::{AnyValue, FunctionValue};
 use inkwell::OptimizationLevel;
+use lexer::token::TokenInfo;
 use lexer::Lexer;
 use parser::ast::BinOp;
 use parser::{Function, Parser};
 
 use crate::compiler::Compiler;
 use crate::error::Error;
-use crate::lexer::token::Token;
 use crate::parser::GlobalVar;
+
+#[macro_use]
+mod macros;
 
 mod cli_impl;
 mod compiler;
@@ -49,22 +52,24 @@ fn get_prec() -> HashMap<BinOp, i32> {
     prec
 }
 
-fn lex(src: &str) -> lexer::Result<Vec<Token>> {
+fn lex(src: &str) -> lexer::Result<Vec<TokenInfo>> {
     Lexer::new(src).into_iter().collect()
 }
 
-fn parse(tokens: Vec<Token>) -> parser::Result<Option<GlobalVar>> {
+fn parse(tokens: Vec<TokenInfo>) -> parser::Result<Option<GlobalVar>> {
     Parser::new(tokens, get_prec()).parse()
 }
 
 // Note: Currently, "module" must live longer than returning `FunctionValue`
 // or it will lead to SEGV when printing built LLVM IRs.
 // refer to: https://github.com/TheDan64/inkwell/issues/343
+/// Passing [`Some`] for [`file_name`] means enabling debug.
 fn compile<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     function: &Function,
     target: Option<&TargetMachine>,
+    file_name: Option<&str>,
 ) -> compiler::Result<FunctionValue<'ctx>> {
     let builder = ctx.create_builder();
     let fpm = PassManager::create(module);
@@ -82,7 +87,9 @@ fn compile<'ctx>(
         .module(module)
         .function_pass_manager(&fpm)
         .emit_obj(target.is_some());
-
+    if let Some(file_name) = file_name {
+        compiler.enable_debug(file_name);
+    }
     if let Some(target) = target {
         compiler.compile_with_target(function, target)
     } else {
@@ -103,7 +110,7 @@ fn eval_anonymous_func(
     log::info!("{result}");
 }
 
-fn run_interactive(ctx: Context) -> Result<()> {
+fn run_interactive(ctx: Context, debug: bool) -> Result<()> {
     let config = InitializationConfig {
         base: true,
         asm_parser: true,
@@ -125,7 +132,7 @@ fn run_interactive(ctx: Context) -> Result<()> {
 
         // Adding previous functions to new module is needed (reason is explained above).
         for function in all_expr.iter() {
-            let _ = compile(&ctx, &module, function, None)
+            let _ = compile(&ctx, &module, function, None, debug.then_some("repl"))
                 .expect("Failed to compile function which was previously compiled successfully.");
         }
 
@@ -164,7 +171,7 @@ fn run_interactive(ctx: Context) -> Result<()> {
                 continue;
             }
         };
-        match compile(&ctx, &module, &function, None) {
+        match compile(&ctx, &module, &function, None, debug.then_some("repl")) {
             Ok(func) => {
                 log::debug!("Compile succeeded!");
                 log::debug!(
@@ -191,13 +198,14 @@ fn run_interactive(ctx: Context) -> Result<()> {
 /// If [`output_file.is_none() && emit_obj`] is [`true`] (internal error).
 fn run_non_interactive(
     ctx: Context,
-    src_file: &str,
+    src_file_name: &str,
     output_file: Option<String>,
     emit: Option<Emit>,
     triple: Option<String>,
+    debug: bool,
 ) -> Result<()> {
-    if !src_file.ends_with(".krr") {
-        log::warn!("file `{src_file}` seems not to be Karreidos source file. Is it really OK to compile this texts?(y/n)");
+    if !src_file_name.ends_with(".krr") {
+        log::warn!("file `{src_file_name}` seems not to be Karreidos source file. Is it really OK to compile this texts?(y/n)");
         loop {
             let mut input = String::new();
             io::stdin()
@@ -213,11 +221,11 @@ fn run_non_interactive(
             }
         }
     }
-    let mod_name = src_file
+    let mod_name = src_file_name
         .find('.')
-        .map(|i| &src_file[..i])
-        .unwrap_or(src_file);
-    let mut src_file = OpenOptions::new().read(true).open(src_file)?;
+        .map(|i| &src_file_name[..i])
+        .unwrap_or(src_file_name);
+    let mut src_file = OpenOptions::new().read(true).open(src_file_name)?;
     let mut src = String::new();
     src_file.read_to_string(&mut src)?;
 
@@ -270,7 +278,13 @@ fn run_non_interactive(
         log::debug!("Funtion with no content.");
         return Ok(());
     };
-    let func = compile(&ctx, &module, &function, target.as_ref())?;
+    let func = compile(
+        &ctx,
+        &module,
+        &function,
+        target.as_ref(),
+        debug.then_some(src_file_name),
+    )?;
     log::info!("Compilation Succeeded!");
     match (emit, output_file) {
         (Some(Emit::Obj), Some(output_file)) => {
@@ -316,8 +330,10 @@ fn main() -> Result<()> {
     log_impl::init_logger();
 
     let ctx = Context::create();
-    match cli_impl::parse_arguments()? {
-        Run::Interactive => run_interactive(ctx),
+    // TODO: debug mode
+    let (run_config, debug) = cli_impl::parse_arguments()?;
+    match run_config {
+        Run::Interactive => run_interactive(ctx, debug),
         Run::NonInteractive {
             src_files,
             output_file,
@@ -325,7 +341,7 @@ fn main() -> Result<()> {
             triple,
         } => match src_files.len() {
             0 => Err(Error::NoSourceProvided),
-            1 => run_non_interactive(ctx, src_files[0].as_str(), output_file, emit, triple),
+            1 => run_non_interactive(ctx, src_files[0].as_str(), output_file, emit, triple, debug),
             _ => {
                 log::error!("Currently, more than single file is not supported.");
                 Ok(())

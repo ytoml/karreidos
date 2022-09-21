@@ -1,21 +1,29 @@
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
+use std::path::Path;
+use std::rc::Rc;
+
 use derive_builder::UninitializedFieldError;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
+use inkwell::debug_info::{
+    AsDIScope, DICompileUnit, DIFile, DIFlagsConstants, DILocation, DIScope, DISubprogram,
+    DISubroutineType, DIType, DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
+};
 use inkwell::module::Module;
 use inkwell::passes::{PassManager, PassManagerSubType};
 use inkwell::targets::TargetMachine;
 use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, FloatValue, FunctionValue, PointerValue};
 use inkwell::FloatPredicate;
-use std::borrow::Borrow;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
 
-use crate::parser::ast::{BinOp, Expr};
-use crate::parser::{Function, ProtoType};
+use crate::parser::ast::{BinOp, Expr, ExprInfo, VarDeclInfo};
+use crate::parser::{Function, ProtoType, ProtoTypeInfo};
 
 pub type Result<T> = std::result::Result<T, CompileError>;
+
+const PRODUCER: &str = concat!(clap::crate_name!(), "-", clap::crate_version!());
 
 #[derive(Debug)]
 pub enum CompileError {
@@ -60,6 +68,125 @@ impl<'ctx> Variable<'ctx> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DebugInfoFactory<'ctx> {
+    ctx: &'ctx Context,
+    builder: Rc<DebugInfoBuilder<'ctx>>,
+    compile_unit: DICompileUnit<'ctx>,
+    ty: DIType<'ctx>, // hold because Karreidos currently support f64 only.
+    lexical_blocks: Vec<DIScope<'ctx>>,
+}
+impl<'ctx> DebugInfoFactory<'ctx> {
+    fn new(ctx: &'ctx Context, module: &Module<'ctx>, file_name: &str) -> Self {
+        // TODO: flexible settings
+        let path = Path::new(file_name)
+            .canonicalize()
+            .expect("Fatal: Source file does not exists.");
+        let filename = path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .expect("Fatal: invalid string for directory.");
+        let directory = path
+            .parent()
+            .expect("Root directory specified.")
+            .as_os_str()
+            .to_str()
+            .expect("Fatal: invalid string for directory.");
+        let debug_output_path = filename.to_string() + "_debug";
+
+        let (builder, compile_unit) = module.create_debug_info_builder(
+            true,
+            DWARFSourceLanguage::C,
+            filename,
+            directory,
+            PRODUCER,
+            false,
+            "",
+            0,
+            &debug_output_path,
+            DWARFEmissionKind::Full,
+            0,
+            false,
+            false,
+            "",
+            "",
+        );
+        // encoding 0 i.e. no modification.
+        let ty = builder
+            .create_basic_type("double", 64, 0, DIFlagsConstants::PUBLIC)
+            .unwrap()
+            .as_type();
+
+        Self {
+            ctx,
+            builder: Rc::new(builder),
+            compile_unit,
+            ty,
+            lexical_blocks: vec![],
+        }
+    }
+
+    fn create_function_type(&self, num_args: usize) -> DISubroutineType<'ctx> {
+        let mut args_ty = Vec::with_capacity(num_args);
+        for _ in 0..num_args {
+            args_ty.push(self.ty)
+        }
+        self.builder.create_subroutine_type(
+            self.get_file(),
+            Some(self.ty),
+            &args_ty,
+            DIFlagsConstants::PUBLIC,
+        )
+    }
+
+    fn create_function(&self, name: &str, num_args: usize, line: u32) -> DISubprogram<'ctx> {
+        let ditype = self.create_function_type(num_args);
+        let file = self.get_file();
+        // line_no and scope_line are set to be same because currently scopes are managed only per function.
+        self.builder.create_function(
+            file.as_debug_info_scope(),
+            name,
+            None,
+            file,
+            line,
+            ditype,
+            false,
+            true,
+            line,
+            DIFlagsConstants::PROTOTYPED,
+            false,
+        )
+    }
+
+    #[inline]
+    fn get_file(&self) -> DIFile<'ctx> {
+        self.compile_unit.get_file()
+    }
+
+    fn emit_location(&self, expr: &ExprInfo) -> DILocation<'ctx> {
+        let scope = self
+            .lexical_blocks
+            .last()
+            .copied()
+            .unwrap_or_else(|| self.compile_unit.as_debug_info_scope());
+        self.builder
+            .create_debug_location(self.ctx, expr.line, expr.col, scope, None)
+    }
+
+    #[inline]
+    fn scope_up(&mut self, scope: DIScope<'ctx>) {
+        self.lexical_blocks.push(scope);
+    }
+
+    #[inline]
+    fn scope_down(&mut self) {
+        self.lexical_blocks
+            .pop()
+            .expect("Fatal: Too much scope down called.");
+    }
+}
+
 /// Compile per function.
 #[derive(Builder, Debug)]
 #[builder(name = "Compiler", build_fn(private, error = "CompileError"))]
@@ -79,11 +206,31 @@ pub struct IrGenerator<'a, 'ctx> {
     this_func: Option<FunctionValue<'ctx>>,
     #[builder(default = "false")]
     emit_obj: bool,
+    #[builder(setter(strip_option, custom), default, private)]
+    debug: Option<DebugInfoFactory<'ctx>>,
 }
 
 impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
-    fn expr_gen(&mut self, expr: &Expr) -> Result<FloatValue<'ctx>> {
-        match expr {
+    #[inline]
+    fn if_debug(&self, callback: impl FnOnce(&DebugInfoFactory<'ctx>)) {
+        if let Some(debug) = self.debug.as_ref() {
+            callback(debug);
+        }
+    }
+
+    #[inline]
+    fn if_debug_mut(&mut self, callback: impl FnOnce(&mut DebugInfoFactory<'ctx>)) {
+        if let Some(debug) = self.debug.as_mut() {
+            callback(debug);
+        }
+    }
+
+    fn expr_gen(&mut self, expr: &ExprInfo) -> Result<FloatValue<'ctx>> {
+        self.if_debug(|factory| {
+            let location = factory.emit_location(expr);
+            self.builder.set_current_debug_location(self.ctx, location);
+        });
+        match &expr.expr {
             &Expr::Number(value) => Ok(self.ctx.f64_type().const_float(value)),
             Expr::Variable(name) => self
                 .get_variable(name)
@@ -93,12 +240,15 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                         .into_float_value()
                 })
                 .ok_or_else(|| CompileError::Undefined(name.clone(), Type::Variable)),
-            Expr::Decl { value, left } => {
+            Expr::Decl {
+                var: VarDeclInfo { var, .. },
+                left,
+            } => {
                 let current_block = self.get_current_block();
-                let alloca = self.stack_alloca_in_block(value.name(), current_block);
+                let alloca = self.stack_alloca_in_block(var.name(), current_block);
                 self.register_variable_at_current_scope(
-                    value.name().to_string(),
-                    Variable::new(alloca, value.is_mutable()),
+                    var.name().to_string(),
+                    Variable::new(alloca, var.is_mutable()),
                 )?;
                 let value = self.expr_gen(left.as_ref())?;
                 self.builder.build_store(alloca, value);
@@ -147,7 +297,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                         ))
                     }
                     BinOp::Assign => {
-                        let var_name = match left.borrow() {
+                        let var_name = match &left.expr {
                             Expr::Variable(name) => name.clone(),
                             expr => {
                                 return Err(CompileError::InvalidAssignment(
@@ -241,7 +391,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                 start,
                 end,
                 step,
-                generatee,
+                generatee: VarDeclInfo { var: generatee, .. },
                 stmts,
             } => {
                 let function = self.get_this_function()?;
@@ -306,7 +456,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     // For flexibility, scope_(up|down) are not in this function.
     fn block_gen(
         &mut self,
-        stmts: &[Expr],
+        stmts: &[ExprInfo],
         basic_block: BasicBlock<'ctx>,
     ) -> Result<FloatValue<'ctx>> {
         self.goto_end_of_block(basic_block);
@@ -338,7 +488,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     }
 
     fn function_gen(&mut self, function: &Function) -> Result<FunctionValue<'ctx>> {
-        let proto = function.proto();
+        let ProtoTypeInfo { proto, line, .. } = function.proto();
         let fn_val = self.proto_gen(proto)?;
         if function.body().is_none() {
             // Only prototype declaration
@@ -363,9 +513,18 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
         let block = self.ctx.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(block);
 
+        self.if_debug_mut(|factory| {
+            let subprogram = factory.create_function(proto.name(), proto.num_args(), *line);
+            fn_val.set_subprogram(subprogram);
+            let scope = subprogram.as_debug_info_scope();
+            factory.scope_up(scope);
+        });
+
         self.scope_up();
         self.variables.reserve(proto.num_args());
-        for (arg, arg_llvm) in proto.args_slice().iter().zip(fn_val.get_param_iter()) {
+        for (VarDeclInfo { var: arg, .. }, arg_llvm) in
+            proto.args_slice().iter().zip(fn_val.get_param_iter())
+        {
             log::debug!("{name}: add arg {}", arg.name());
             let stack_alloca = self.entry_block_stack_alloca(name, &fn_val);
             let _ = self.builder.build_store(stack_alloca, arg_llvm);
@@ -383,6 +542,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
             log::debug!("{return_inst}");
         }
         self.scope_down();
+        self.if_debug_mut(|factory| factory.scope_down());
 
         log::debug!("Before optimization: {fn_val}");
         fn_val
@@ -403,12 +563,14 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     }
 }
 impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
+    #[inline]
     fn get_this_function(&self) -> Result<FunctionValue<'ctx>> {
         self.this_func.ok_or_else(|| {
             CompileError::Other("Function required while it has not been set yet".to_string())
         })
     }
 
+    #[inline]
     fn register_this_function(&mut self, function: FunctionValue<'ctx>) -> Result<()> {
         match self.this_func {
             None => {
@@ -422,6 +584,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
         }
     }
 
+    #[inline]
     fn get_function(&self, name: impl AsRef<str>) -> Option<FunctionValue<'ctx>> {
         // Look into `self.module` rather than `self.variables`
         // Because (currently) `IeGenerator` provides per function generation and thus
@@ -430,6 +593,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
         self.module.get_function(name.as_ref())
     }
 
+    #[inline]
     fn get_current_block(&self) -> BasicBlock<'ctx> {
         self.builder
             .get_insert_block()
@@ -504,6 +668,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     }
 
     // Insert stack allocation at beggining of the basic block
+    #[inline]
     fn stack_alloca_in_block(
         &self,
         var_name: &str,
@@ -515,6 +680,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     }
 
     // Creates a new stack allocation instruction in the entry block of the function.
+    #[inline]
     fn entry_block_stack_alloca(
         &self,
         var_name: &str,
@@ -543,6 +709,23 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
 }
 
 impl<'a, 'ctx> Compiler<'a, 'ctx> {
+    /// Enable debug.
+    /// # Panics
+    /// If this method is called before setting [`ctx`] or ['module'] (because debug info builder needs them internally).
+    #[inline]
+    pub fn enable_debug(&mut self, file_name: &str) -> &mut Self {
+        let ctx = self
+            .ctx
+            .expect("Fatal: Compiler::debug must be called after Context is set.");
+        let module = self
+            .module
+            .expect("Fatal: Compiler::debug must be called after Module is set.");
+        let debug = DebugInfoFactory::new(ctx, module, file_name);
+        self.debug = Some(Some(debug));
+        self
+    }
+
+    #[inline]
     pub fn compile(&'a self, function: &Function) -> Result<FunctionValue<'ctx>> {
         let compiler = self.build()?;
         compile(compiler, function)
@@ -551,6 +734,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     /// Run compiler with target information through [`TargetMachine`].
     /// # Panics
     /// If [`emit_obj`] is toggled to [`true`] in builder chain.
+    #[inline]
     pub fn compile_with_target(
         &'a self,
         function: &Function,
@@ -568,6 +752,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     }
 }
 
+#[inline]
 fn compile<'ctx>(
     mut compiler: IrGenerator<'_, 'ctx>,
     function: &Function,
@@ -602,6 +787,38 @@ mod test {
             .context(&ctx)
             .module(&module)
             .function_pass_manager(&fpm)
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn enable_debug() {
+        let ctx = Context::create();
+        let builder = ctx.create_builder();
+        let module = ctx.create_module("test");
+        let fpm = PassManager::create(&module);
+        let _compiler = Compiler::default()
+            .builder(&builder)
+            .context(&ctx)
+            .module(&module)
+            .function_pass_manager(&fpm)
+            .enable_debug("Cargo.toml") // need to specify exisiting file.
+            .build()
+            .unwrap();
+    }
+    #[should_panic]
+    #[test]
+    fn enable_debug_non_existing_path() {
+        let ctx = Context::create();
+        let builder = ctx.create_builder();
+        let module = ctx.create_module("test");
+        let fpm = PassManager::create(&module);
+        let _compiler = Compiler::default()
+            .builder(&builder)
+            .context(&ctx)
+            .module(&module)
+            .function_pass_manager(&fpm)
+            .enable_debug("__FooBar.txt") // need to specify exisiting file.
             .build()
             .unwrap();
     }

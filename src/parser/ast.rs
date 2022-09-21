@@ -9,55 +9,61 @@ use crate::lexer::token::Token;
 pub enum Expr {
     Binary {
         op: BinOp,
-        left: Box<Expr>,
-        right: Box<Expr>,
+        left: Box<ExprInfo>,
+        right: Box<ExprInfo>,
     },
     Call {
         callee: String,
-        args: VecDeque<Expr>,
+        args: VecDeque<ExprInfo>,
     },
     If {
-        cond: Box<Expr>,
-        stmts: Vec<Expr>,
+        cond: Box<ExprInfo>,
+        stmts: Vec<ExprInfo>,
         // Note that it has single Expr::If for "else if ..."
-        else_stmts: Vec<Expr>,
+        else_stmts: Vec<ExprInfo>,
     },
     For {
-        start: Box<Expr>,
-        end: Box<Expr>,
-        step: Box<Expr>,
-        generatee: Value, // currently only 1 variable can be generated
-        stmts: Vec<Expr>,
+        start: Box<ExprInfo>,
+        end: Box<ExprInfo>,
+        step: Box<ExprInfo>,
+        generatee: VarDeclInfo, // currently only 1 variable can be generated
+        stmts: Vec<ExprInfo>,
     },
     Decl {
-        value: Value,
-        left: Box<Expr>,
+        var: VarDeclInfo,
+        left: Box<ExprInfo>,
     },
-    Block(Vec<Expr>), // needed to manage scope
+    Block(Vec<ExprInfo>), // needed to manage scope
     Variable(String),
     Number(f64),
 }
-impl Expr {
+info_impl!(Expr, expr);
+impl ExprInfo {
+    #[inline]
     pub fn boxed(self) -> Box<Self> {
         Box::new(self)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct Value {
+pub struct VarDecl {
     name: String,
     is_mutable: bool,
 }
-impl Value {
-    pub(super) fn new(name: String, is_mutable: bool) -> Self {
+info_impl!(VarDecl, var);
+impl VarDecl {
+    #[inline]
+    pub(super) const fn new(name: String, is_mutable: bool) -> Self {
         Self { name, is_mutable }
     }
 
+    #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn is_mutable(&self) -> bool {
+    #[inline]
+    pub const fn is_mutable(&self) -> bool {
         self.is_mutable
     }
 }

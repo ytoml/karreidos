@@ -1,11 +1,11 @@
-use super::ast::{BinOp, Expr};
+use super::ast::{BinOp, Expr, ExprInfo};
 use super::{ParseError, Result};
 
-pub(super) fn desugar_pipe(lhs: Expr, rhs: Expr) -> Result<Expr> {
-    match rhs {
+pub(super) fn desugar_pipe(lhs: ExprInfo, rhs: ExprInfo) -> Result<ExprInfo> {
+    match rhs.expr {
         Expr::Call { callee, mut args } => {
             args.push_front(lhs);
-            Ok(Expr::Call { callee, args })
+            Ok(Expr::Call { callee, args }.with_src_info(rhs.line, rhs.col))
         }
         Expr::Binary {
             op: BinOp::Pipe, ..

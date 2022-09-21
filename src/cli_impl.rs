@@ -15,6 +15,8 @@ pub struct Arguments {
     emit: Option<String>,
     #[clap(short = 't', long = "target")]
     triple: Option<String>,
+    #[clap(short = 'd', long = "debug-info", takes_value = false)]
+    debug: bool,
 }
 
 #[derive(Debug)]
@@ -52,7 +54,7 @@ impl From<Emit> for FileType {
     }
 }
 
-pub fn parse_arguments() -> Result<Run> {
+pub fn parse_arguments() -> Result<(Run, bool)> {
     let args = Arguments::parse();
     log::debug!("{args:?}");
     let Arguments {
@@ -61,6 +63,7 @@ pub fn parse_arguments() -> Result<Run> {
         output_file,
         emit,
         triple,
+        debug,
     } = args;
     if interactive {
         if !src_files.is_empty() {
@@ -77,7 +80,7 @@ pub fn parse_arguments() -> Result<Run> {
         if let Some(format) = emit {
             log::warn!("Emit `{format}` is ignored in interactive model.")
         }
-        Ok(Run::Interactive)
+        Ok((Run::Interactive, debug))
     } else {
         if let Some("") = output_file.as_deref() {
             return Err(Error::OutputPathEmpty);
@@ -96,11 +99,14 @@ pub fn parse_arguments() -> Result<Run> {
             .map(|path| path.to_string())
             .collect();
         let emit = emit.map(TryInto::try_into).transpose()?;
-        Ok(Run::NonInteractive {
-            src_files,
-            output_file,
-            emit,
-            triple,
-        })
+        Ok((
+            Run::NonInteractive {
+                src_files,
+                output_file,
+                emit,
+                triple,
+            },
+            debug,
+        ))
     }
 }

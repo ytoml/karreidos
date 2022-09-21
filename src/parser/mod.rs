@@ -4,59 +4,84 @@ mod desugar;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 
-use self::ast::{BinOp, Expr, Value};
-use crate::lexer::token::Token;
+use self::ast::{BinOp, Expr, ExprInfo, VarDecl, VarDeclInfo};
+use crate::lexer::token::{Token, TokenInfo};
 use crate::ANONYMOUS_FN_NAME;
 
 pub type Result<T> = std::result::Result<T, ParseError>;
 
 #[derive(Debug)]
 pub enum ParseError {
-    Unexpected(Token),
+    Unexpected(Unexpected),
     TokenShortage,
     Unimplemented,
-    NonCallableAtPipeRhs(Expr),
+    NonCallableAtPipeRhs(ExprInfo),
     Reserved(&'static str),
+}
+impl ParseError {
+    #[inline]
+    const fn eof() -> Self {
+        Self::Unexpected(Unexpected::Eof)
+    }
+
+    #[inline]
+    const fn unexpected_token(token: Token, line: u32, col: u32) -> Self {
+        Self::Unexpected(Unexpected::Token(token.with_src_info(line, col)))
+    }
 }
 
 #[derive(Debug)]
+pub enum Unexpected {
+    Eof,
+    Token(TokenInfo),
+}
+
+#[derive(Debug, Clone)]
 pub struct ProtoType {
     name: String,
-    args: Vec<Value>,
+    args: Vec<VarDeclInfo>,
 }
 impl ProtoType {
+    #[inline]
     pub fn num_args(&self) -> usize {
         self.args.len()
     }
 
+    #[inline]
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
 
-    pub fn args_slice(&self) -> &[Value] {
+    #[inline]
+    pub fn args_slice(&self) -> &[VarDeclInfo] {
         self.args.as_slice()
     }
 
+    #[inline]
     pub fn arg_names_iter(&self) -> impl Iterator<Item = &str> {
-        self.args.iter().map(|value| value.name())
+        self.args.iter().map(|value| value.var.name())
     }
 }
+info_impl!(ProtoType, proto);
 
 #[derive(Debug)]
 pub struct Function {
-    proto: ProtoType,
-    body: Option<Vec<Expr>>,
+    proto: ProtoTypeInfo,
+    body: Option<Vec<ExprInfo>>,
     is_anonymous: bool,
 }
 impl Function {
-    pub fn proto(&self) -> &ProtoType {
+    #[inline]
+    pub fn proto(&self) -> &ProtoTypeInfo {
         &self.proto
     }
 
-    pub fn body(&self) -> Option<&[Expr]> {
+    #[inline]
+    pub fn body(&self) -> Option<&[ExprInfo]> {
         self.body.as_deref()
     }
 
+    #[inline]
     pub fn is_anonymous(&self) -> bool {
         self.is_anonymous
     }
@@ -75,7 +100,7 @@ pub struct Scope {
 
 #[derive(Debug)]
 pub struct Parser {
-    tokens: Vec<Token>,
+    tokens: Vec<TokenInfo>,
     // for binop precedence, but key is char
     // because [`BinOp`] is created through parsing
     prec: HashMap<BinOp, i32>,
@@ -83,7 +108,8 @@ pub struct Parser {
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>, prec: HashMap<BinOp, i32>) -> Self {
+    #[inline]
+    pub fn new(tokens: Vec<TokenInfo>, prec: HashMap<BinOp, i32>) -> Self {
         Self {
             tokens,
             prec,
@@ -104,7 +130,7 @@ impl Parser {
                 Token::Fn => self.func()?,
                 _ => self.top_level_expr()?,
             };
-            if !func.is_anonymous() && func.proto().name() == ANONYMOUS_FN_NAME {
+            if !func.is_anonymous() && func.proto().proto.name() == ANONYMOUS_FN_NAME {
                 Err(ParseError::Reserved(ANONYMOUS_FN_NAME))
             } else {
                 Ok(Some(GlobalVar::Function(func)))
@@ -119,6 +145,7 @@ impl Parser {
     /// ```
     fn top_level_expr(&mut self) -> Result<Function> {
         let mut exprs = vec![];
+        let (line, col) = self.expect_src_info()?;
         if let Some(expr) = self.stmt()? {
             exprs.push(expr);
         }
@@ -126,7 +153,8 @@ impl Parser {
             proto: ProtoType {
                 name: ANONYMOUS_FN_NAME.to_string(),
                 args: vec![],
-            },
+            }
+            .with_src_info(line, col),
             body: Some(exprs),
             is_anonymous: true,
         })
@@ -135,7 +163,7 @@ impl Parser {
     /// ```no_run
     /// expr ::= primary bin_rhs
     /// ```
-    fn expr(&mut self) -> Result<Expr> {
+    fn expr(&mut self) -> Result<ExprInfo> {
         let lhs = self.primary()?;
         self.bin_rhs(0, lhs)
     }
@@ -143,17 +171,18 @@ impl Parser {
     /// ```no_run
     /// stmt ::= (decl | expr | block)? ';'
     /// ```
-    fn stmt(&mut self) -> Result<Option<Expr>> {
+    fn stmt(&mut self) -> Result<Option<ExprInfo>> {
         // TODO: refine BNF
         let _ = self._consume_comment();
         if self.consume_in_case_single(';')? {
             return Ok(None);
         }
+        let (line, col) = self.expect_src_info()?;
         let expr = if self.current_is_let()? {
             self.decl()?
         } else if self.current_is_single('{')? {
             let stmts = self.block()?;
-            Expr::Block(stmts)
+            Expr::Block(stmts).with_src_info(line, col)
         } else {
             self.expr()?
         };
@@ -167,21 +196,23 @@ impl Parser {
     /// ```
     /// # Panics
     /// If current head token is not 'let'.
-    fn decl(&mut self) -> Result<Expr> {
+    fn decl(&mut self) -> Result<ExprInfo> {
         self.consume_let();
-        let value = self.var()?;
+        let var = self.var()?;
+        let (line, col) = self.expect_src_info()?;
         self.try_consume_single('=')?;
         let left = self.expr()?.boxed();
-        Ok(Expr::Decl { value, left })
+        Ok(Expr::Decl { var, left }.with_src_info(line, col))
     }
 
     /// ```no_run
     /// var ::= ("mut")? ident
     /// ```
-    fn var(&mut self) -> Result<Value> {
+    fn var(&mut self) -> Result<VarDeclInfo> {
         let is_mutable = self.consume_in_case_mut()?;
+        let (line, col) = self.expect_src_info()?;
         let name = self.try_consume_ident()?;
-        Ok(Value::new(name, is_mutable))
+        Ok(VarDecl::new(name, is_mutable).with_src_info(line, col))
     }
 
     /// ```no_run
@@ -191,14 +222,15 @@ impl Parser {
     ///          | contional
     ///          | for_expr
     /// ```
-    fn primary(&mut self) -> Result<Expr> {
+    fn primary(&mut self) -> Result<ExprInfo> {
+        let (line, col) = self.expect_src_info()?;
         match self.expect()? {
             Token::Ident(_) => self.ident_expr(),
             Token::Num(_) => self.num_expr(),
             Token::Single('(') => self.paren_expr(),
             Token::If => self.conditional(),
             Token::For => self.for_expr(),
-            tok => Err(ParseError::Unexpected(tok)),
+            tok => Err(ParseError::unexpected_token(tok, line, col)),
         }
     }
 
@@ -207,7 +239,7 @@ impl Parser {
     /// ```
     /// # Panics
     /// If current head token is not '{'.
-    fn block(&mut self) -> Result<Vec<Expr>> {
+    fn block(&mut self) -> Result<Vec<ExprInfo>> {
         self.try_consume_single('{')?;
         let mut stmts = vec![];
         loop {
@@ -227,7 +259,8 @@ impl Parser {
     /// ```
     /// # Panics
     /// If current head token is not 'if'.
-    fn conditional(&mut self) -> Result<Expr> {
+    fn conditional(&mut self) -> Result<ExprInfo> {
+        let (line, col) = self.current_src_info().unwrap();
         self.consume_if();
         let cond = self.expr()?.boxed();
         let stmts = self.block()?;
@@ -245,7 +278,8 @@ impl Parser {
             cond,
             stmts,
             else_stmts,
-        })
+        }
+        .with_src_info(line, col))
     }
 
     /// ```no_run
@@ -253,7 +287,8 @@ impl Parser {
     /// ```
     /// # Panics
     /// If current head token is not 'for'.
-    fn for_expr(&mut self) -> Result<Expr> {
+    fn for_expr(&mut self) -> Result<ExprInfo> {
+        let (line, col) = self.current_src_info().unwrap();
         self.consume_for();
         let generatee = self.var()?;
         self.try_consume_double("<-")?;
@@ -269,7 +304,8 @@ impl Parser {
             step,
             generatee,
             stmts,
-        })
+        }
+        .with_src_info(line, col))
     }
 
     fn current_precedence(&self) -> Option<i32> {
@@ -284,12 +320,13 @@ impl Parser {
     /// bin_rhs ::= (bin_op primary)*
     /// bin_op ::= /* refer to BinOp */
     /// ```
-    fn bin_rhs(&mut self, precedence: i32, mut lhs: Expr) -> Result<Expr> {
+    fn bin_rhs(&mut self, precedence: i32, mut lhs: ExprInfo) -> Result<ExprInfo> {
         loop {
             log::debug!("{:?}", self.current());
             let tok_prec = self.current_precedence();
             if matches!(tok_prec, Some(p) if p >= precedence) {
                 let tok_prec = tok_prec.unwrap();
+                let (line, col) = self.current_src_info().unwrap();
                 let op = self.consume().try_into().unwrap();
                 let mut rhs = self.primary()?;
                 // in case form of:
@@ -309,6 +346,7 @@ impl Parser {
                         left: Box::new(lhs),
                         right: Box::new(rhs),
                     }
+                    .with_src_info(line, col)
                 };
             } else {
                 return Ok(lhs);
@@ -320,13 +358,13 @@ impl Parser {
     /// num_expr ::= number
     ///
     /// ```
-    fn num_expr(&mut self) -> Result<Expr> {
-        let expr = match self.tokens[self.pos] {
+    fn num_expr(&mut self) -> Result<ExprInfo> {
+        let (line, col) = self.expect_src_info()?;
+        let expr = match self.consume() {
             Token::Num(val) => Expr::Number(val),
             _ => return Err(ParseError::Unimplemented),
         };
-        self.pos += 1;
-        Ok(expr)
+        Ok(expr.with_src_info(line, col))
     }
 
     /// ```no_run
@@ -335,7 +373,7 @@ impl Parser {
     /// ```
     /// # Panics
     /// If current head token is not '('.
-    fn paren_expr(&mut self) -> Result<Expr> {
+    fn paren_expr(&mut self) -> Result<ExprInfo> {
         self.consume_single('(');
         let expr = self.expr()?;
         self.try_consume_single(')')?;
@@ -346,7 +384,8 @@ impl Parser {
     /// ident_expr ::= ident
     ///              | ident '(' (expr ',')* (expr)? (',')?  ')'
     /// ```
-    fn ident_expr(&mut self) -> Result<Expr> {
+    fn ident_expr(&mut self) -> Result<ExprInfo> {
+        let (line, col) = self.expect_src_info()?;
         let name = self.try_consume_ident()?;
         if self.consume_in_case_single('(')? {
             let mut args = VecDeque::new();
@@ -362,16 +401,17 @@ impl Parser {
                 self.consume_single(',');
             }
             self.try_consume_single(')')?;
-            Ok(Expr::Call { callee: name, args })
+            Ok(Expr::Call { callee: name, args }.with_src_info(line, col))
         } else {
-            Ok(Expr::Variable(name))
+            Ok(Expr::Variable(name).with_src_info(line, col))
         }
     }
 
     /// ```no_run
     /// proto ::= ident '(' (var ',')* ident ')'
     /// ```
-    fn proto(&mut self) -> Result<ProtoType> {
+    fn proto(&mut self) -> Result<ProtoTypeInfo> {
+        let (line, col) = self.expect_src_info()?;
         let name = self.try_consume_ident()?;
         let mut args = vec![];
         self.try_consume_single('(')?;
@@ -388,7 +428,7 @@ impl Parser {
             }
             self.consume_single(',');
         }
-        Ok(ProtoType { name, args })
+        Ok(ProtoType { name, args }.with_src_info(line, col))
     }
 
     /// ```no_run
@@ -397,7 +437,6 @@ impl Parser {
     /// # Panics
     /// If current head token is not 'fn'.
     fn func(&mut self) -> Result<Function> {
-        // TODO: escaping scope of 'fn'
         self.try_consume_fn()?;
         let proto = self.proto()?;
         let stmts = self.block()?;
@@ -431,18 +470,33 @@ impl Parser {
 impl Parser {
     #[inline]
     fn current(&self) -> Option<Token> {
-        (self.pos < self.tokens.len()).then(|| self.tokens[self.pos].clone())
+        (self.pos < self.tokens.len()).then(|| self.tokens[self.pos].token.clone())
     }
 
-    /// Note that this take [`Token::Eof`] as an error.
+    /// Get the location (i.e. line and column) of the current token.
+    #[inline]
+    fn current_src_info(&self) -> Option<(u32, u32)> {
+        (self.pos < self.tokens.len()).then(|| {
+            let info = &self.tokens[self.pos];
+            (info.line, info.col)
+        })
+    }
+
+    /// Get the current token. Note that this take [`Token::Eof`] as an error.
     #[inline]
     fn expect(&self) -> Result<Token> {
         self.current()
             .ok_or(ParseError::TokenShortage)
             .and_then(|tok| match tok {
-                Token::Eof => Err(ParseError::Unexpected(Token::Eof)),
+                Token::Eof => Err(ParseError::eof()),
                 tok => Ok(tok),
             })
+    }
+
+    /// Get the location (i.e. line and column) of the current token. Note that this take [`Token::Eof`] as an error.
+    #[inline]
+    fn expect_src_info(&self) -> Result<(u32, u32)> {
+        self.current_src_info().ok_or(ParseError::TokenShortage)
     }
 
     // implicitly ignoring comments
@@ -479,11 +533,12 @@ impl Parser {
 
     #[inline]
     fn _try_consume_specified(&mut self, expected_token: Token) -> Result<Token> {
+        let (line, col) = self.expect_src_info()?;
         let tok = self.try_consume()?;
         if tok == expected_token {
             Ok(tok)
         } else {
-            Err(ParseError::Unexpected(tok))
+            Err(ParseError::unexpected_token(tok, line, col))
         }
     }
 }
@@ -574,11 +629,12 @@ impl Parser {
 
     #[inline]
     fn try_consume_ident(&mut self) -> Result<String> {
+        let (line, col) = self.expect_src_info()?;
         let tok = self.try_consume()?;
         if let Token::Ident(name) = tok {
             Ok(name)
         } else {
-            Err(ParseError::Unexpected(tok))
+            Err(ParseError::unexpected_token(tok, line, col))
         }
     }
 }

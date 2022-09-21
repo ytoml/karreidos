@@ -16,6 +16,7 @@ pub enum Token {
     Single(char),
     Double(&'static str),
 }
+info_impl!(Token, token);
 
 impl<'a> TryFrom<&'a str> for Token {
     type Error = &'a str;
