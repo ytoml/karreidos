@@ -28,6 +28,7 @@ use crate::parser::GlobalVar;
 #[macro_use]
 mod macros;
 
+mod builtins;
 mod cli_impl;
 mod compiler;
 mod error;
@@ -119,6 +120,7 @@ fn run_interactive(ctx: Context, debug: bool) -> Result<()> {
         info: false,
         machine_code: false,
     };
+    builtins::init();
     Target::initialize_all(&config);
 
     let mut all_expr = Vec::new();

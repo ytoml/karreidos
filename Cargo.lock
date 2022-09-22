@@ -250,6 +250,7 @@ dependencies = [
  "derive_builder",
  "env_logger",
  "inkwell",
+ "llvm-sys",
  "log",
  "paste",
  "thiserror",
