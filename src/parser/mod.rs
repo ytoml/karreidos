@@ -647,3 +647,71 @@ impl Parser {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl PartialEq for Expr {
+        fn eq(&self, other: &Self) -> bool {
+            use Expr::*;
+            match self {
+                Binary { op, left, right } => {
+                    matches!(other, Binary { op: o, left: l, right: r } if op == o && left == l && right == r)
+                }
+                Block(exprs) => matches!(other, Block(b) if exprs == b),
+                Call { callee, args } => {
+                    matches!(other, Call { callee: c, args:a } if callee==c && args == a)
+                }
+                Number(f) => matches!(other, Number(g) if f == g),
+                Variable(name) => matches!(other, Variable(n) if name == n),
+                _ => panic!("No use for this test!"),
+            }
+        }
+    }
+
+    impl PartialEq for ExprInfo {
+        fn eq(&self, other: &Self) -> bool {
+            self.expr == other.expr
+        }
+    }
+
+    fn compare_ast(expected_equivalent: &[(&str, &str)]) {
+        fn compile(src: &str) -> Vec<ExprInfo> {
+            use crate::lexer::{Lexer, Result as LexResult};
+            let lexer = Lexer::new(src)
+                .into_iter()
+                .collect::<LexResult<Vec<_>>>()
+                .unwrap();
+            let mut parser = Parser::new(lexer);
+            match parser.parse().unwrap().unwrap() {
+                GlobalVar::Function(f) => f.body.unwrap(),
+            }
+        }
+        expected_equivalent
+            .iter()
+            .map(|(l, r)| {
+                // Add semicolon as Parser takes expressions without ';' invalid.
+                let l = format!("{l};");
+                let r = format!("{r};");
+                assert_eq!(compile(&l), compile(&r));
+            })
+            .collect()
+    }
+
+    #[test]
+    fn precedence() {
+        compare_ast(&[
+            ("1 + 2 + 3", "((1 + 2) + 3)"),
+            ("1 + 2 * 3", "(1 + (2 * 3))"),
+            ("1 + 2 * 3 / 4 ;", "(1 + ((2 * 3) / 4))"),
+            ("1 + 2 * 3 / 4 - 5;", "((1 + ((2 * 3) / 4)) - 5)"),
+            ("1 + 1 > 2", "(1 + 1) > 2"),
+            (
+                "1+1+1+1+1+1+1+1+1+1+1",
+                "((((((((((1+1)+1)+1)+1)+1)+1)+1)+1)+1)+1)",
+            ),
+            ("1 + 2 /> add()", "(1 + 2) /> add()"),
+        ]);
+    }
+}
