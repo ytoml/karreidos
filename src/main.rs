@@ -3,7 +3,6 @@
 #[macro_use]
 extern crate derive_builder;
 
-use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, BufWriter, Read, Write};
 
@@ -18,7 +17,6 @@ use inkwell::values::{AnyValue, FunctionValue};
 use inkwell::OptimizationLevel;
 use lexer::token::TokenInfo;
 use lexer::Lexer;
-use parser::ast::BinOp;
 use parser::{Function, Parser};
 
 use crate::compiler::Compiler;
@@ -40,25 +38,12 @@ mod preprocessor;
 const ANONYMOUS_FN_NAME: &str = "__anonymous__"; // Empty string seems to be invalid for LLVM function name.
 type Result<T> = std::result::Result<T, Error>;
 
-fn get_prec() -> HashMap<BinOp, i32> {
-    let mut prec = HashMap::with_capacity(7);
-    prec.insert(BinOp::Assign, 0);
-    prec.insert(BinOp::Pipe, 10);
-    prec.insert(BinOp::Lt, 20);
-    prec.insert(BinOp::Gt, 20);
-    prec.insert(BinOp::Add, 30);
-    prec.insert(BinOp::Sub, 30);
-    prec.insert(BinOp::Mul, 50);
-    prec.insert(BinOp::Div, 50);
-    prec
-}
-
 fn lex(src: &str) -> lexer::Result<Vec<TokenInfo>> {
     Lexer::new(src).into_iter().collect()
 }
 
 fn parse(tokens: Vec<TokenInfo>) -> parser::Result<Option<GlobalVar>> {
-    Parser::new(tokens, get_prec()).parse()
+    Parser::new(tokens).parse()
 }
 
 // Note: Currently, "module" must live longer than returning `FunctionValue`

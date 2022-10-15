@@ -4,11 +4,27 @@ mod desugar;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 
+use once_cell::sync::Lazy;
+
 use self::ast::{BinOp, Expr, ExprInfo, VarDecl, VarDeclInfo};
 use crate::lexer::token::{Token, TokenInfo};
 use crate::ANONYMOUS_FN_NAME;
 
 pub type Result<T> = std::result::Result<T, ParseError>;
+
+// for binop precedence
+static PREC: Lazy<HashMap<BinOp, i32>> = Lazy::new(|| {
+    let mut prec = HashMap::with_capacity(7);
+    prec.insert(BinOp::Assign, 0);
+    prec.insert(BinOp::Pipe, 10);
+    prec.insert(BinOp::Lt, 20);
+    prec.insert(BinOp::Gt, 20);
+    prec.insert(BinOp::Add, 30);
+    prec.insert(BinOp::Sub, 30);
+    prec.insert(BinOp::Mul, 50);
+    prec.insert(BinOp::Div, 50);
+    prec
+});
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -101,20 +117,13 @@ pub struct Scope {
 #[derive(Debug)]
 pub struct Parser {
     tokens: Vec<TokenInfo>,
-    // for binop precedence, but key is char
-    // because [`BinOp`] is created through parsing
-    prec: HashMap<BinOp, i32>,
     pos: usize,
 }
 
 impl Parser {
     #[inline]
-    pub fn new(tokens: Vec<TokenInfo>, prec: HashMap<BinOp, i32>) -> Self {
-        Self {
-            tokens,
-            prec,
-            pos: 0,
-        }
+    pub fn new(tokens: Vec<TokenInfo>) -> Self {
+        Self { tokens, pos: 0 }
     }
 
     /// ```no_run
@@ -310,7 +319,7 @@ impl Parser {
 
     fn current_precedence(&self) -> Option<i32> {
         if let Ok(op) = self.current()?.try_into() {
-            self.prec.get(&op).copied()
+            PREC.get(&op).copied()
         } else {
             None
         }
