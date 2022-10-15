@@ -65,7 +65,6 @@ Note that redefining variable in the same scope (block) is prohibited.
 [ERROR] Redefined("i", Variable)
 ```
 ## To be implemented
-- [ ] Kaleidoscope itself.
-    current progress: chapter 9
+- [x] Kaleidoscope itself (except chapter 6).
 - [ ] Language server protocol
 - [ ] Port them using tree-sitter
