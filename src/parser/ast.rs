@@ -1,8 +1,7 @@
-use std::{
-    collections::VecDeque,
-    convert::{TryFrom, TryInto},
-};
+use std::collections::VecDeque;
+use std::convert::{TryFrom, TryInto};
 
+use crate::error::info::SrcInfo;
 use crate::lexer::token::Token;
 
 #[derive(Debug, Clone)]

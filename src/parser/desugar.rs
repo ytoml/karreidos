@@ -5,7 +5,7 @@ pub(super) fn desugar_pipe(lhs: ExprInfo, rhs: ExprInfo) -> Result<ExprInfo> {
     match rhs.expr {
         Expr::Call { callee, mut args } => {
             args.push_front(lhs);
-            Ok(Expr::Call { callee, args }.with_src_info(rhs.line, rhs.col))
+            Ok(Expr::Call { callee, args }.with_info(rhs.info))
         }
         Expr::Binary {
             op: BinOp::Pipe, ..

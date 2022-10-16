@@ -23,12 +23,10 @@ use crate::compiler::Compiler;
 use crate::error::Error;
 use crate::parser::GlobalVar;
 
-#[macro_use]
-mod macros;
-
 mod builtins;
 mod cli_impl;
 mod compiler;
+#[macro_use]
 mod error;
 mod lexer;
 mod log_impl;

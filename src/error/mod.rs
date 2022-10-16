@@ -1,3 +1,6 @@
+#[macro_use]
+pub mod info;
+
 use crate::{compiler::CompileError, lexer::LexError, parser::ParseError};
 use paste::paste;
 use thiserror::Error as ThisError;

@@ -171,7 +171,7 @@ impl<'ctx> DebugInfoFactory<'ctx> {
             .copied()
             .unwrap_or_else(|| self.compile_unit.as_debug_info_scope());
         self.builder
-            .create_debug_location(self.ctx, expr.line, expr.col, scope, None)
+            .create_debug_location(self.ctx, expr.info.line, expr.info.col, scope, None)
     }
 
     #[inline]
@@ -488,7 +488,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     }
 
     fn function_gen(&mut self, function: &Function) -> Result<FunctionValue<'ctx>> {
-        let ProtoTypeInfo { proto, line, .. } = function.proto();
+        let ProtoTypeInfo { proto, info, .. } = function.proto();
         let fn_val = self.proto_gen(proto)?;
         if function.body().is_none() {
             // Only prototype declaration
@@ -514,7 +514,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
         self.builder.position_at_end(block);
 
         self.if_debug_mut(|factory| {
-            let subprogram = factory.create_function(proto.name(), proto.num_args(), *line);
+            let subprogram = factory.create_function(proto.name(), proto.num_args(), info.line);
             fn_val.set_subprogram(subprogram);
             let scope = subprogram.as_debug_info_scope();
             factory.scope_up(scope);

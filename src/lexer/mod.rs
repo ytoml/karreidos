@@ -50,7 +50,7 @@ impl<'a> Lexer<'a> {
                 let _ = chars.next().unwrap();
             } else {
                 self.pos = pos;
-                return Ok(Token::Eof.with_src_info(self.line, self.col));
+                return Ok(Token::Eof.with_line_and_col(self.line, self.col));
             }
             pos += 1;
             self.col += 1;
@@ -172,7 +172,7 @@ impl<'a> Lexer<'a> {
             }
             c => Token::Single(c),
         }
-        .with_src_info(self.line, self.col);
+        .with_line_and_col(self.line, self.col);
         self.pos = pos;
         self.line = line;
         self.col = col;

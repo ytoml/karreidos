@@ -1,3 +1,5 @@
+use crate::error::info::SrcInfo;
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
     Eof,

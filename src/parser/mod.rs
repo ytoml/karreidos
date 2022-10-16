@@ -7,6 +7,7 @@ use std::convert::TryInto;
 use once_cell::sync::Lazy;
 
 use self::ast::{BinOp, Expr, ExprInfo, VarDecl, VarDeclInfo};
+use crate::error::info::SrcInfo;
 use crate::lexer::token::{Token, TokenInfo};
 use crate::ANONYMOUS_FN_NAME;
 
@@ -41,8 +42,8 @@ impl ParseError {
     }
 
     #[inline]
-    const fn unexpected_token(token: Token, line: u32, col: u32) -> Self {
-        Self::Unexpected(Unexpected::Token(token.with_src_info(line, col)))
+    const fn unexpected_token(token: Token, info: SrcInfo) -> Self {
+        Self::Unexpected(Unexpected::Token(token.with_info(info)))
     }
 }
 
@@ -154,7 +155,7 @@ impl Parser {
     /// ```
     fn top_level_expr(&mut self) -> Result<Function> {
         let mut exprs = vec![];
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         if let Some(expr) = self.stmt()? {
             exprs.push(expr);
         }
@@ -163,7 +164,7 @@ impl Parser {
                 name: ANONYMOUS_FN_NAME.to_string(),
                 args: vec![],
             }
-            .with_src_info(line, col),
+            .with_info(info),
             body: Some(exprs),
             is_anonymous: true,
         })
@@ -186,12 +187,12 @@ impl Parser {
         if self.consume_in_case_single(';')? {
             return Ok(None);
         }
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         let expr = if self.current_is_let()? {
             self.decl()?
         } else if self.current_is_single('{')? {
             let stmts = self.block()?;
-            Expr::Block(stmts).with_src_info(line, col)
+            Expr::Block(stmts).with_info(info)
         } else {
             self.expr()?
         };
@@ -208,10 +209,10 @@ impl Parser {
     fn decl(&mut self) -> Result<ExprInfo> {
         self.consume_let();
         let var = self.var()?;
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         self.try_consume_single('=')?;
         let left = self.expr()?.boxed();
-        Ok(Expr::Decl { var, left }.with_src_info(line, col))
+        Ok(Expr::Decl { var, left }.with_info(info))
     }
 
     /// ```no_run
@@ -219,9 +220,9 @@ impl Parser {
     /// ```
     fn var(&mut self) -> Result<VarDeclInfo> {
         let is_mutable = self.consume_in_case_mut()?;
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         let name = self.try_consume_ident()?;
-        Ok(VarDecl::new(name, is_mutable).with_src_info(line, col))
+        Ok(VarDecl::new(name, is_mutable).with_info(info))
     }
 
     /// ```no_run
@@ -232,14 +233,14 @@ impl Parser {
     ///          | for_expr
     /// ```
     fn primary(&mut self) -> Result<ExprInfo> {
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         match self.expect()? {
             Token::Ident(_) => self.ident_expr(),
             Token::Num(_) => self.num_expr(),
             Token::Single('(') => self.paren_expr(),
             Token::If => self.conditional(),
             Token::For => self.for_expr(),
-            tok => Err(ParseError::unexpected_token(tok, line, col)),
+            tok => Err(ParseError::unexpected_token(tok, info)),
         }
     }
 
@@ -269,7 +270,7 @@ impl Parser {
     /// # Panics
     /// If current head token is not 'if'.
     fn conditional(&mut self) -> Result<ExprInfo> {
-        let (line, col) = self.current_src_info().unwrap();
+        let info = self.current_src_info().unwrap();
         self.consume_if();
         let cond = self.expr()?.boxed();
         let stmts = self.block()?;
@@ -288,7 +289,7 @@ impl Parser {
             stmts,
             else_stmts,
         }
-        .with_src_info(line, col))
+        .with_info(info))
     }
 
     /// ```no_run
@@ -297,7 +298,7 @@ impl Parser {
     /// # Panics
     /// If current head token is not 'for'.
     fn for_expr(&mut self) -> Result<ExprInfo> {
-        let (line, col) = self.current_src_info().unwrap();
+        let info = self.current_src_info().unwrap();
         self.consume_for();
         let generatee = self.var()?;
         self.try_consume_double("<-")?;
@@ -314,7 +315,7 @@ impl Parser {
             generatee,
             stmts,
         }
-        .with_src_info(line, col))
+        .with_info(info))
     }
 
     fn current_precedence(&self) -> Option<i32> {
@@ -335,7 +336,7 @@ impl Parser {
             let tok_prec = self.current_precedence();
             if matches!(tok_prec, Some(p) if p >= precedence) {
                 let tok_prec = tok_prec.unwrap();
-                let (line, col) = self.current_src_info().unwrap();
+                let info = self.current_src_info().unwrap();
                 let op = self.consume().try_into().unwrap();
                 let mut rhs = self.primary()?;
                 // in case form of:
@@ -355,7 +356,7 @@ impl Parser {
                         left: Box::new(lhs),
                         right: Box::new(rhs),
                     }
-                    .with_src_info(line, col)
+                    .with_info(info)
                 };
             } else {
                 return Ok(lhs);
@@ -368,12 +369,12 @@ impl Parser {
     ///
     /// ```
     fn num_expr(&mut self) -> Result<ExprInfo> {
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         let expr = match self.consume() {
             Token::Num(val) => Expr::Number(val),
             _ => return Err(ParseError::Unimplemented),
         };
-        Ok(expr.with_src_info(line, col))
+        Ok(expr.with_info(info))
     }
 
     /// ```no_run
@@ -394,7 +395,7 @@ impl Parser {
     ///              | ident '(' (expr ',')* (expr)? (',')?  ')'
     /// ```
     fn ident_expr(&mut self) -> Result<ExprInfo> {
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         let name = self.try_consume_ident()?;
         if self.consume_in_case_single('(')? {
             let mut args = VecDeque::new();
@@ -410,9 +411,9 @@ impl Parser {
                 self.consume_single(',');
             }
             self.try_consume_single(')')?;
-            Ok(Expr::Call { callee: name, args }.with_src_info(line, col))
+            Ok(Expr::Call { callee: name, args }.with_info(info))
         } else {
-            Ok(Expr::Variable(name).with_src_info(line, col))
+            Ok(Expr::Variable(name).with_info(info))
         }
     }
 
@@ -420,7 +421,7 @@ impl Parser {
     /// proto ::= ident '(' (var ',')* ident ')'
     /// ```
     fn proto(&mut self) -> Result<ProtoTypeInfo> {
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         let name = self.try_consume_ident()?;
         let mut args = vec![];
         self.try_consume_single('(')?;
@@ -437,7 +438,7 @@ impl Parser {
             }
             self.consume_single(',');
         }
-        Ok(ProtoType { name, args }.with_src_info(line, col))
+        Ok(ProtoType { name, args }.with_info(info))
     }
 
     /// ```no_run
@@ -484,10 +485,10 @@ impl Parser {
 
     /// Get the location (i.e. line and column) of the current token.
     #[inline]
-    fn current_src_info(&self) -> Option<(u32, u32)> {
+    fn current_src_info(&self) -> Option<SrcInfo> {
         (self.pos < self.tokens.len()).then(|| {
             let info = &self.tokens[self.pos];
-            (info.line, info.col)
+            info.info
         })
     }
 
@@ -504,7 +505,7 @@ impl Parser {
 
     /// Get the location (i.e. line and column) of the current token. Note that this take [`Token::Eof`] as an error.
     #[inline]
-    fn expect_src_info(&self) -> Result<(u32, u32)> {
+    fn expect_src_info(&self) -> Result<SrcInfo> {
         self.current_src_info().ok_or(ParseError::TokenShortage)
     }
 
@@ -542,12 +543,12 @@ impl Parser {
 
     #[inline]
     fn _try_consume_specified(&mut self, expected_token: Token) -> Result<Token> {
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         let tok = self.try_consume()?;
         if tok == expected_token {
             Ok(tok)
         } else {
-            Err(ParseError::unexpected_token(tok, line, col))
+            Err(ParseError::unexpected_token(tok, info))
         }
     }
 }
@@ -638,12 +639,12 @@ impl Parser {
 
     #[inline]
     fn try_consume_ident(&mut self) -> Result<String> {
-        let (line, col) = self.expect_src_info()?;
+        let info = self.expect_src_info()?;
         let tok = self.try_consume()?;
         if let Token::Ident(name) = tok {
             Ok(name)
         } else {
-            Err(ParseError::unexpected_token(tok, line, col))
+            Err(ParseError::unexpected_token(tok, info))
         }
     }
 }
