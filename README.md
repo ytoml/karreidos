@@ -8,8 +8,10 @@ Main differences from original Kaleidoscope:
 - Loop statement with genarator-like syntax (`for i <- 1..10, 1 { /* .. */ }`)
 - Pipe operator `/>`
 
+Note that you should modify `Cargo.toml` if using LLVM version other than `14.x`.
+
 You can open REPL with:
-```
+```shell
 cargo build --release
 ./target/release/karreidos -i
 ```
