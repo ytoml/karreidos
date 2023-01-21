@@ -228,7 +228,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
     fn expr_gen(&mut self, expr: &ExprInfo) -> Result<FloatValue<'ctx>> {
         self.if_debug(|factory| {
             let location = factory.emit_location(expr);
-            self.builder.set_current_debug_location(self.ctx, location);
+            self.builder.set_current_debug_location(location);
         });
         match &expr.expr {
             &Expr::Number(value) => Ok(self.ctx.f64_type().const_float(value)),
@@ -236,7 +236,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                 .get_variable(name)
                 .map(|var| {
                     self.builder
-                        .build_load(var.pointer_value, name)
+                        .build_load(self.ctx.f64_type(), var.pointer_value, name)
                         .into_float_value()
                 })
                 .ok_or_else(|| CompileError::Undefined(name.clone(), Type::Variable)),
@@ -415,7 +415,9 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                     // ```for mut i <- 0..10, 1 { i = i + 1; };```
                     // yields 10 repetitions.
                     let alloca = self.stack_alloca_in_block(generatee.name(), for_block);
-                    let value = self.builder.build_load(acc_alloca, "muttmp");
+                    let value = self
+                        .builder
+                        .build_load(self.ctx.f64_type(), acc_alloca, "muttmp");
                     self.builder.build_store(alloca, value);
                     alloca
                 } else {
@@ -430,7 +432,7 @@ impl<'a, 'ctx> IrGenerator<'a, 'ctx> {
                 self.builder.position_at_end(for_block);
                 let acc_value = self
                     .builder
-                    .build_load(acc_alloca, "acctmp")
+                    .build_load(self.ctx.f64_type(), acc_alloca, "acctmp")
                     .into_float_value();
                 let next_acc_value =
                     self.builder
