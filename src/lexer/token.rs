@@ -54,5 +54,5 @@ pub fn can_be_head_of_ident(c: char) -> bool {
 
 /// Only supports 0..=9 and `.`. Hex or exp is not currently supported.
 pub fn available_in_num(c: char) -> bool {
-    ('0'..='9').contains(&c) || c == '.'
+    c.is_ascii_digit() || c == '.'
 }

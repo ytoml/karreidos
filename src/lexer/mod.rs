@@ -198,7 +198,6 @@ mod tests {
     use super::*;
     fn expect_success(src: &'static str, expected_tokens: Vec<Token>) {
         let result: Result<Vec<Token>> = Lexer::new(src)
-            .into_iter()
             .map(|res| res.map(|info| info.token))
             .collect();
         assert_eq!(result.expect("lex failed."), expected_tokens,);

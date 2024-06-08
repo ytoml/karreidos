@@ -37,7 +37,7 @@ const ANONYMOUS_FN_NAME: &str = "__anonymous__"; // Empty string seems to be inv
 type Result<T> = std::result::Result<T, Error>;
 
 fn lex(src: &str) -> lexer::Result<Vec<TokenInfo>> {
-    Lexer::new(src).into_iter().collect()
+    Lexer::new(src).collect()
 }
 
 fn parse(tokens: Vec<TokenInfo>) -> parser::Result<Option<GlobalVar>> {

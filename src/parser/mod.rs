@@ -680,10 +680,7 @@ mod tests {
     fn compare_ast(expected_equivalent: &[(&str, &str)]) {
         fn compile(src: &str) -> Vec<ExprInfo> {
             use crate::lexer::{Lexer, Result as LexResult};
-            let lexer = Lexer::new(src)
-                .into_iter()
-                .collect::<LexResult<Vec<_>>>()
-                .unwrap();
+            let lexer = Lexer::new(src).collect::<LexResult<Vec<_>>>().unwrap();
             let mut parser = Parser::new(lexer);
             match parser.parse().unwrap().unwrap() {
                 GlobalVar::Function(f) => f.body.unwrap(),
